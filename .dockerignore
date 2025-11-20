@@ -1,0 +1,28 @@
+# Exclude target directory from Docker build context
+# This prevents Docker from copying host build artifacts
+target/
+
+# Git files
+.git/
+.gitignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+
+# Documentation
+README.md
+LICENSE
+Documents/
+
+# CI/CD
+.github/
+
+# Test artifacts
+*.log
