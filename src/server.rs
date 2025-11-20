@@ -46,31 +46,411 @@ fn parse_authority(authority: &str) -> Result<(String, u16), String> {
 }
 
 /// Serve HTTP/2 connections using direct h2 crate
+/// Phase 4: Direct h2::server implementation for Extended CONNECT support
 pub async fn serve_h2(
-    _tls_stream: TlsStream<TcpStream>,
-    _config: Arc<Config>,
+    tls_stream: TlsStream<TcpStream>,
+    config: Arc<Config>,
 ) -> Result<()> {
     info!("HTTP/2 connection handler started");
 
-    // Phase 2: JWT authentication and rate limiting are available in config:
-    // - config.jwt_validator.validate_request(&request) -> Result<JwtClaims, AuthError>
-    // - config.rate_limiter.check_limit(&claims.token_id).await -> Result<(), RateLimitError>
+    // Phase 4.1: Create h2 server connection with h2::server::Builder
+    let mut h2_conn = h2::server::Builder::new()
+        .initial_window_size(65535)                    // 64KB per stream
+        .initial_connection_window_size(1024 * 1024)   // 1MB connection window
+        .max_concurrent_streams(100)                   // Limit concurrent streams
+        .max_frame_size(16384)                         // 16KB frame size
+        .handshake(tls_stream)
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTP/2 handshake failed: {}", e))?;
 
-    // TODO: Phase 4 - Implement HTTP/2 CONNECT handler
-    // This will use the h2 crate directly to handle Extended CONNECT requests
-    // See RUST_PROXY_IMPLEMENTATION_PLAN_V4_1_CONCRETE.md Phase 4 for implementation details
-    //
-    // Implementation will include:
-    // 1. h2::server::handshake(tls_stream)
-    // 2. Accept streams and validate CONNECT requests
-    // 3. Authenticate: let claims = config.jwt_validator.validate_request(&request)?;
-    // 4. Rate limit: config.rate_limiter.check_limit(&claims.token_id).await?;
-    // 5. Connect to upstream and tunnel data
+    info!("HTTP/2 handshake complete, accepting streams");
 
-    // Placeholder: Just log and close for now
-    info!("HTTP/2 handler not yet implemented - closing connection");
+    // Phase 4.2: Accept and process streams
+    while let Some(result) = h2_conn.accept().await {
+        match result {
+            Ok((request, respond)) => {
+                let config = Arc::clone(&config);
+
+                // Spawn task to handle each stream independently
+                tokio::spawn(async move {
+                    if let Err(e) = handle_h2_connect(request, respond, config).await {
+                        error!("[H2] Stream handler error: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                error!("[H2] Error accepting stream: {}", e);
+                break;
+            }
+        }
+    }
+
+    info!("HTTP/2 connection closed");
+    Ok(())
+}
+
+/// Handle HTTP/2 CONNECT request on a single stream
+/// Phase 4: Complete CONNECT handler with auth, rate limiting, and tunneling
+async fn handle_h2_connect(
+    request: Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    config: Arc<Config>,
+) -> Result<()> {
+    let start_time = std::time::Instant::now();
+
+    // Phase 4.3: Validate CONNECT method
+    if request.method() != Method::CONNECT {
+        warn!("[H2] Non-CONNECT request: {}", request.method());
+        send_h2_error(
+            &mut respond,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Only CONNECT method supported"
+        ).await?;
+        return Ok(());
+    }
+
+    // Phase 4.4: Extract and validate authority
+    let target_host = match request.uri().authority() {
+        Some(auth) => auth.to_string(),
+        None => {
+            warn!("[H2] Missing authority in CONNECT request");
+            send_h2_error(
+                &mut respond,
+                StatusCode::BAD_REQUEST,
+                "Bad Request: CONNECT requires a valid host:port authority"
+            ).await?;
+            return Ok(());
+        }
+    };
+
+    // Validate authority format (reuse parse_authority from HTTP/1.1)
+    let (_host, _port) = match parse_authority(&target_host) {
+        Ok((h, p)) => (h, p),
+        Err(err_msg) => {
+            warn!("[H2] Invalid authority {}: {}", target_host, err_msg);
+            send_h2_error(
+                &mut respond,
+                StatusCode::BAD_REQUEST,
+                &format!("Bad Request: {}", err_msg)
+            ).await?;
+            return Ok(());
+        }
+    };
+
+    // Phase 4.5: JWT Authentication
+    let claims = match config.jwt_validator.validate_request(&request) {
+        Ok(claims) => claims,
+        Err(e) => {
+            return handle_h2_auth_error(e, &target_host, start_time, &mut respond).await;
+        }
+    };
+
+    info!(
+        "[H2 CONNECT] Authenticated {} - user_id={}, token_id={}, regions={:?}",
+        target_host, claims.user_id, claims.token_id, claims.allowed_regions
+    );
+
+    // Phase 4.6: Rate Limiting
+    match config.rate_limiter.check_limit(&claims.token_id).await {
+        Ok(()) => {},
+        Err(e) => {
+            return handle_h2_rate_limit_error(e, &target_host, &claims.token_id, start_time, &mut respond).await;
+        }
+    };
+
+    // Phase 4.7: Connect to upstream
+    let upstream = match tokio::net::TcpStream::connect(&target_host).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            let duration = start_time.elapsed();
+            error!(
+                "[H2 CONNECT] Failed to connect to {} - user_id={}, token_id={}, error={}, duration={:?}",
+                target_host, claims.user_id, claims.token_id, e, duration
+            );
+            send_h2_error(
+                &mut respond,
+                StatusCode::BAD_GATEWAY,
+                "Failed to connect to upstream server"
+            ).await?;
+            return Ok(());
+        }
+    };
+
+    info!(
+        "[H2 CONNECT] Connected to {} - user_id={}, token_id={}",
+        target_host, claims.user_id, claims.token_id
+    );
+
+    // Phase 4.8: Send 200 Connection Established and get SendStream
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .body(())
+        .unwrap();
+
+    let send_stream = match respond.send_response(response, false) {
+        Ok(stream) => stream,
+        Err(e) => {
+            error!("[H2 CONNECT] Failed to send response: {}", e);
+            return Err(anyhow::anyhow!("Failed to send 200 response: {}", e));
+        }
+    };
+
+    // Phase 4.9: Extract RecvStream from request body
+    let recv_stream = request.into_body();
+
+    info!(
+        "[H2 CONNECT] Starting tunnel for {} - user_id={}, token_id={}",
+        target_host, claims.user_id, claims.token_id
+    );
+
+    // Phase 4.10: Spawn tunnel task
+    tokio::spawn(async move {
+        match tunnel_h2_streams(
+            recv_stream,
+            send_stream,
+            upstream,
+            target_host.clone(),
+            claims.user_id,
+            claims.token_id.clone(),
+            start_time,
+        ).await {
+            Ok((bytes_sent, bytes_received)) => {
+                let duration = start_time.elapsed();
+                info!(
+                    "[H2 CONNECT] Completed {} - user_id={}, token_id={}, duration={:?}, \
+                     client→upstream={} bytes, upstream→client={} bytes, total={} bytes",
+                    target_host,
+                    claims.user_id,
+                    claims.token_id,
+                    duration,
+                    bytes_sent,
+                    bytes_received,
+                    bytes_sent + bytes_received
+                );
+            }
+            Err(e) => {
+                error!(
+                    "[H2 CONNECT] Tunnel error for {} - user_id={}, token_id={}, error={}",
+                    target_host, claims.user_id, claims.token_id, e
+                );
+            }
+        }
+    });
 
     Ok(())
+}
+
+/// Send error response for HTTP/2 stream
+async fn send_h2_error(
+    respond: &mut h2::server::SendResponse<Bytes>,
+    status: StatusCode,
+    _message: &str,
+) -> Result<()> {
+    let response = Response::builder()
+        .status(status)
+        .body(())
+        .unwrap();
+
+    respond.send_response(response, true)
+        .map_err(|e| anyhow::anyhow!("Failed to send error response: {}", e))?;
+
+    Ok(())
+}
+
+/// Handle HTTP/2 authentication errors
+async fn handle_h2_auth_error(
+    error: AuthError,
+    target_host: &str,
+    start_time: std::time::Instant,
+    respond: &mut h2::server::SendResponse<Bytes>,
+) -> Result<()> {
+    let duration = start_time.elapsed();
+
+    let (status, _message) = match error {
+        AuthError::MissingHeader => {
+            warn!("[H2 CONNECT] Missing Proxy-Authorization for {} (duration={:?})", target_host, duration);
+            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Proxy authentication required")
+        },
+        AuthError::InvalidFormat => {
+            warn!("[H2 CONNECT] Invalid auth format for {} (duration={:?})", target_host, duration);
+            (StatusCode::BAD_REQUEST, "Invalid Proxy-Authorization format. Expected: Bearer <token>")
+        },
+        AuthError::TokenExpired => {
+            warn!("[H2 CONNECT] Expired token for {} (duration={:?})", target_host, duration);
+            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Token expired")
+        },
+        AuthError::ValidationFailed(ref msg) => {
+            warn!("[H2 CONNECT] Token validation failed for {}: {} (duration={:?})", target_host, msg, duration);
+            (StatusCode::FORBIDDEN, "Token validation failed")
+        },
+        AuthError::RegionNotAllowed(ref msg) => {
+            warn!("[H2 CONNECT] Region not allowed for {}: {} (duration={:?})", target_host, msg, duration);
+            (StatusCode::FORBIDDEN, "Access denied: Region not in allowed list")
+        },
+    };
+
+    // Build response with Proxy-Authenticate header for 407
+    let mut response = Response::builder().status(status);
+
+    if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+        response = response.header(
+            "proxy-authenticate",
+            "Bearer realm=\"ProbeOps Forward Proxy\""
+        );
+    }
+
+    let response = response.body(()).unwrap();
+    respond.send_response(response, true)
+        .map_err(|e| anyhow::anyhow!("Failed to send auth error: {}", e))?;
+
+    Ok(())
+}
+
+/// Handle HTTP/2 rate limit errors
+async fn handle_h2_rate_limit_error(
+    error: RateLimitError,
+    target_host: &str,
+    token_id: &str,
+    start_time: std::time::Instant,
+    respond: &mut h2::server::SendResponse<Bytes>,
+) -> Result<()> {
+    let duration = start_time.elapsed();
+
+    let (status, _message) = match error {
+        RateLimitError::LimitExceeded(_) => {
+            warn!(
+                "[H2 CONNECT] Rate limit exceeded for {} - token_id={} (duration={:?})",
+                target_host, token_id, duration
+            );
+            (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded. Please retry later.")
+        },
+        RateLimitError::TooManyTokens(max) => {
+            error!(
+                "[H2 CONNECT] Too many tokens for {} - max={} (duration={:?})",
+                target_host, max, duration
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable. Maximum concurrent tokens reached."
+            )
+        },
+    };
+
+    let response = Response::builder()
+        .status(status)
+        .body(())
+        .unwrap();
+
+    respond.send_response(response, true)
+        .map_err(|e| anyhow::anyhow!("Failed to send rate limit error: {}", e))?;
+
+    Ok(())
+}
+
+/// Bidirectional tunnel for HTTP/2 streams
+/// Phase 4: Copy data between h2 streams and TCP upstream
+async fn tunnel_h2_streams(
+    mut recv_stream: h2::RecvStream,
+    mut send_stream: h2::SendStream<Bytes>,
+    upstream: TcpStream,
+    target_host: String,
+    user_id: i32,
+    token_id: String,
+    start_time: std::time::Instant,
+) -> Result<(u64, u64)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut upstream_read, mut upstream_write) = upstream.into_split();
+
+    let mut bytes_client_to_upstream = 0u64;
+    let mut bytes_upstream_to_client = 0u64;
+    let mut upstream_buf = vec![0u8; 16384]; // 16KB buffer
+
+    loop {
+        tokio::select! {
+            // Client → Upstream (via RecvStream)
+            result = recv_stream.data() => {
+                match result {
+                    Some(Ok(data)) => {
+                        let len = data.len();
+
+                        // Write to upstream
+                        upstream_write.write_all(&data).await?;
+                        bytes_client_to_upstream += len as u64;
+
+                        // Release flow control capacity
+                        let _ = recv_stream.flow_control().release_capacity(len);
+                    }
+                    Some(Err(e)) => {
+                        error!(
+                            "[H2 TUNNEL] RecvStream error for {} - user_id={}, token_id={}, error={}",
+                            target_host, user_id, token_id, e
+                        );
+                        break;
+                    }
+                    None => {
+                        // Client closed stream
+                        debug!(
+                            "[H2 TUNNEL] Client closed stream for {} - user_id={}, token_id={}",
+                            target_host, user_id, token_id
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // Upstream → Client (via SendStream)
+            result = upstream_read.read(&mut upstream_buf) => {
+                match result {
+                    Ok(0) => {
+                        // Upstream closed connection
+                        debug!(
+                            "[H2 TUNNEL] Upstream closed for {} - user_id={}, token_id={}",
+                            target_host, user_id, token_id
+                        );
+                        break;
+                    }
+                    Ok(n) => {
+                        let data = Bytes::copy_from_slice(&upstream_buf[..n]);
+
+                        // Reserve capacity before sending
+                        send_stream.reserve_capacity(n);
+
+                        // Send data to client
+                        if let Err(e) = send_stream.send_data(data, false) {
+                            error!(
+                                "[H2 TUNNEL] SendStream error for {} - user_id={}, token_id={}, error={}",
+                                target_host, user_id, token_id, e
+                            );
+                            break;
+                        }
+
+                        bytes_upstream_to_client += n as u64;
+                    }
+                    Err(e) => {
+                        error!(
+                            "[H2 TUNNEL] Upstream read error for {} - user_id={}, token_id={}, error={}",
+                            target_host, user_id, token_id, e
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Close SendStream with END_STREAM flag
+    let _ = send_stream.send_data(Bytes::new(), true);
+
+    let duration = start_time.elapsed();
+    info!(
+        "[H2 TUNNEL] Closed {} - user_id={}, token_id={}, duration={:?}, \
+         client→upstream={} bytes, upstream→client={} bytes",
+        target_host, user_id, token_id, duration,
+        bytes_client_to_upstream, bytes_upstream_to_client
+    );
+
+    Ok((bytes_client_to_upstream, bytes_upstream_to_client))
 }
 
 /// Serve HTTP/1.1 connections using Hyper
