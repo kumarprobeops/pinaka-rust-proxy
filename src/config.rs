@@ -56,7 +56,7 @@ impl Config {
             .unwrap_or_else(|_| "/etc/letsencrypt/live/staging.probeops.com/privkey.pem".to_string());
 
         let jwt_secret = env::var("JWT_SECRET")
-            .unwrap_or_else(|_| "phase1_placeholder_secret".to_string());
+            .context("JWT_SECRET environment variable is required for authentication")?;
         let jwt_algorithm = env::var("JWT_ALGORITHM")
             .unwrap_or_else(|_| "HS256".to_string());
 

@@ -31,6 +31,10 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::from_env()?);
     info!("Configuration loaded");
 
+    // Start background cleanup task for rate limiter (runs every 60 seconds)
+    rate_limiter::RateLimiter::start_cleanup_task(Arc::clone(&config.rate_limiter), 60);
+    info!("Rate limiter cleanup task started (interval: 60s)");
+
     // Setup reloadable TLS acceptor with HTTP/2 ALPN
     let tls_acceptor = ReloadableTlsAcceptor::new(
         config.cert_path.clone(),

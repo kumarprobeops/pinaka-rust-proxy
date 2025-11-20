@@ -46,6 +46,10 @@ pub struct JwtClaims {
     /// Issuer (e.g., "probeops")
     #[serde(default)]
     pub iss: Option<String>,
+
+    /// Audience (e.g., "forward-proxy")
+    #[serde(default)]
+    pub aud: Option<String>,
 }
 
 /// JWT Validator with configuration
@@ -54,6 +58,8 @@ pub struct JwtValidator {
     secret: String,
     algorithm: Algorithm,
     current_region: String,
+    expected_issuer: Option<String>,
+    expected_audience: Option<String>,
 }
 
 impl JwtValidator {
@@ -70,6 +76,8 @@ impl JwtValidator {
             secret,
             algorithm: algo,
             current_region,
+            expected_issuer: Some("probeops".to_string()),
+            expected_audience: Some("forward-proxy".to_string()),
         })
     }
 
@@ -98,10 +106,28 @@ impl JwtValidator {
         validation.validate_exp = true;
         validation.validate_nbf = false; // Not Before is optional
 
+        // Set issuer and audience validation
+        if let Some(ref iss) = self.expected_issuer {
+            validation.set_issuer(&[iss]);
+        }
+        if let Some(ref aud) = self.expected_audience {
+            validation.set_audience(&[aud]);
+        }
+
         // Decode and validate token
         let decoding_key = DecodingKey::from_secret(self.secret.as_bytes());
         let token_data = decode::<JwtClaims>(token, &decoding_key, &validation)
-            .map_err(|e| AuthError::ValidationFailed(e.to_string()))?;
+            .map_err(|e| {
+                // Check specific error types
+                use jsonwebtoken::errors::ErrorKind;
+                match e.kind() {
+                    ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+                    ErrorKind::InvalidIssuer => AuthError::ValidationFailed("Invalid issuer".to_string()),
+                    ErrorKind::InvalidAudience => AuthError::ValidationFailed("Invalid audience".to_string()),
+                    ErrorKind::InvalidSignature => AuthError::ValidationFailed("Invalid signature".to_string()),
+                    _ => AuthError::ValidationFailed(e.to_string()),
+                }
+            })?;
 
         let claims = token_data.claims;
 
@@ -138,6 +164,7 @@ pub type SharedJwtValidator = Arc<JwtValidator>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{encode, EncodingKey, Header};
 
     #[test]
     fn test_extract_bearer_token() {
@@ -166,6 +193,9 @@ mod tests {
             "us-east".to_string(),
         );
         assert!(validator.is_ok());
+        let validator = validator.unwrap();
+        assert_eq!(validator.expected_issuer, Some("probeops".to_string()));
+        assert_eq!(validator.expected_audience, Some("forward-proxy".to_string()));
 
         let validator = JwtValidator::new(
             "test_secret".to_string(),
@@ -176,9 +206,285 @@ mod tests {
     }
 
     #[test]
-    fn test_region_validation() {
-        // This test would require a valid JWT token
-        // For now, it's a placeholder for future integration tests
-        // Real JWT tokens will be tested in integration tests with actual backend tokens
+    fn test_valid_token_validation() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+        ).unwrap();
+
+        // Create a valid token
+        let claims = JwtClaims {
+            token_id: "test_token_123".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string(), "eu-west".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        // Validate token
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_ok());
+        let validated_claims = result.unwrap();
+        assert_eq!(validated_claims.token_id, "test_token_123");
+        assert_eq!(validated_claims.user_id, 42);
+    }
+
+    #[test]
+    fn test_expired_token() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+        ).unwrap();
+
+        // Create an expired token (1 hour ago)
+        let claims = JwtClaims {
+            token_id: "expired_token".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string()],
+            exp: (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp(),
+            iat: (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        // Validate expired token
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_err());
+
+        // Check that it's specifically a TokenExpired error
+        match result.unwrap_err() {
+            AuthError::TokenExpired => (),
+            other => panic!("Expected TokenExpired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_signature() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+        ).unwrap();
+
+        // Create a token with different secret
+        let claims = JwtClaims {
+            token_id: "test_token".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret("wrong_secret".as_bytes()),
+        ).unwrap();
+
+        // Validate with wrong secret
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            AuthError::ValidationFailed(msg) => {
+                assert!(msg.contains("Invalid signature"));
+            },
+            other => panic!("Expected ValidationFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_region_not_allowed() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "ap-south".to_string(), // Different region
+        ).unwrap();
+
+        // Create a token that only allows us-east and eu-west
+        let claims = JwtClaims {
+            token_id: "test_token".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string(), "eu-west".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        // Validate in ap-south region
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            AuthError::RegionNotAllowed(region) => {
+                assert_eq!(region, "ap-south");
+            },
+            other => panic!("Expected RegionNotAllowed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_issuer() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+        ).unwrap();
+
+        // Create a token with wrong issuer
+        let claims = JwtClaims {
+            token_id: "test_token".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("malicious_issuer".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            AuthError::ValidationFailed(msg) => {
+                assert!(msg.contains("Invalid issuer"));
+            },
+            other => panic!("Expected ValidationFailed with issuer error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_audience() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+        ).unwrap();
+
+        // Create a token with wrong audience
+        let claims = JwtClaims {
+            token_id: "test_token".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("wrong_service".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            AuthError::ValidationFailed(msg) => {
+                assert!(msg.contains("Invalid audience"));
+            },
+            other => panic!("Expected ValidationFailed with audience error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_proxy_authorization_header() {
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+        ).unwrap();
+
+        let claims = JwtClaims {
+            token_id: "test_token".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        // Test with Proxy-Authorization header
+        let mut request = http::Request::builder()
+            .header("Proxy-Authorization", format!("Bearer {}", token))
+            .body(())
+            .unwrap();
+
+        let result = validator.validate_request(&request);
+        assert!(result.is_ok());
+
+        // Test with Authorization header (fallback)
+        request = http::Request::builder()
+            .header("Authorization", format!("Bearer {}", token))
+            .body(())
+            .unwrap();
+
+        let result = validator.validate_request(&request);
+        assert!(result.is_ok());
+
+        // Test missing header
+        request = http::Request::builder()
+            .body(())
+            .unwrap();
+
+        let result = validator.validate_request(&request);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AuthError::MissingHeader => (),
+            other => panic!("Expected MissingHeader, got {:?}", other),
+        }
     }
 }

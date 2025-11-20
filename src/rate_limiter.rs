@@ -177,13 +177,13 @@ impl RateLimiter {
                 // First request from this token
                 debug!("Creating new token bucket for {}", token_id);
 
-                // Check if we've hit max buckets limit
+                // Check if we've hit max buckets limit before evicting active tokens
                 if buckets.len() >= self.config.max_buckets {
-                    // LRU cache will automatically evict oldest entry
-                    debug!(
-                        "Max buckets reached ({}), LRU will evict oldest",
+                    warn!(
+                        "Max token buckets reached ({}). Rejecting new token to prevent eviction of active buckets.",
                         self.config.max_buckets
                     );
+                    return Err(RateLimitError::TooManyTokens(self.config.max_buckets));
                 }
 
                 // Create new bucket
@@ -237,6 +237,18 @@ impl RateLimiter {
         if !expired_tokens.is_empty() {
             debug!("Cleaned up {} expired token buckets", expired_tokens.len());
         }
+    }
+
+    /// Start background cleanup task
+    /// This spawns a tokio task that periodically cleans up expired buckets
+    pub fn start_cleanup_task(limiter: SharedRateLimiter, interval_secs: u64) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                limiter.cleanup_expired().await;
+            }
+        });
     }
 }
 
@@ -347,5 +359,175 @@ mod tests {
         let _ = limiter.check_limit("test_token").await;
         let stats = limiter.get_stats().await;
         assert_eq!(stats.active_tokens, 1);
+    }
+
+    #[tokio::test]
+    async fn test_too_many_tokens_error() {
+        let config = RateLimiterConfig {
+            requests_per_minute: 60,
+            burst_size: 5,
+            bucket_ttl_seconds: 300,
+            max_buckets: 3, // Very low limit to test
+        };
+
+        let limiter = RateLimiter::new(config);
+
+        // Add 3 tokens (should succeed)
+        assert!(limiter.check_limit("token1").await.is_ok());
+        assert!(limiter.check_limit("token2").await.is_ok());
+        assert!(limiter.check_limit("token3").await.is_ok());
+
+        // 4th token should fail with TooManyTokens
+        let result = limiter.check_limit("token4").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RateLimitError::TooManyTokens(max) => {
+                assert_eq!(max, 3);
+            },
+            other => panic!("Expected TooManyTokens, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bucket_ttl_expiry() {
+        let config = RateLimiterConfig {
+            requests_per_minute: 6000, // High rate to allow refill
+            burst_size: 5,
+            bucket_ttl_seconds: 1, // Very short TTL for testing
+            max_buckets: 100,
+        };
+
+        let limiter = RateLimiter::new(config);
+
+        // Make first request
+        assert!(limiter.check_limit("test_token").await.is_ok());
+
+        // Wait for bucket to expire
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Next request should create a new bucket (full capacity)
+        // If we can make 5 more requests, it's a new bucket
+        for i in 0..5 {
+            let result = limiter.check_limit("test_token").await;
+            assert!(result.is_ok(), "Request {} should succeed after TTL expiry", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_buckets() {
+        let config = RateLimiterConfig {
+            requests_per_minute: 60,
+            burst_size: 5,
+            bucket_ttl_seconds: 1, // Short TTL for testing
+            max_buckets: 100,
+        };
+
+        let limiter = RateLimiter::new(config);
+
+        // Create 3 buckets
+        assert!(limiter.check_limit("token1").await.is_ok());
+        assert!(limiter.check_limit("token2").await.is_ok());
+        assert!(limiter.check_limit("token3").await.is_ok());
+
+        // Verify 3 active tokens
+        let stats = limiter.get_stats().await;
+        assert_eq!(stats.active_tokens, 3);
+
+        // Wait for buckets to expire
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Clean up expired buckets
+        limiter.cleanup_expired().await;
+
+        // Should have no active tokens after cleanup
+        let stats = limiter.get_stats().await;
+        assert_eq!(stats.active_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn test_token_bucket_refill() {
+        let mut bucket = TokenBucket::new(2, 120, Duration::from_secs(300));
+
+        // Consume all tokens
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        assert!(!bucket.try_consume()); // Should fail
+
+        // Wait for refill (120 req/min = 2 req/sec)
+        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+
+        // Should be able to consume again after refill
+        assert!(bucket.try_consume());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_access() {
+        let config = RateLimiterConfig {
+            requests_per_minute: 600,
+            burst_size: 100,
+            bucket_ttl_seconds: 300,
+            max_buckets: 100,
+        };
+
+        let limiter = Arc::new(RateLimiter::new(config));
+        let mut handles = vec![];
+
+        // Spawn 10 concurrent tasks, each making 10 requests
+        for task_id in 0..10 {
+            let limiter_clone = Arc::clone(&limiter);
+            let handle = tokio::spawn(async move {
+                let token_id = format!("token_{}", task_id);
+                let mut success_count = 0;
+                for _ in 0..10 {
+                    if limiter_clone.check_limit(&token_id).await.is_ok() {
+                        success_count += 1;
+                    }
+                }
+                success_count
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        let mut total_success = 0;
+        for handle in handles {
+            total_success += handle.await.unwrap();
+        }
+
+        // Should allow all 100 requests (within burst capacity)
+        assert_eq!(total_success, 100);
+
+        // Verify 10 active tokens
+        let stats = limiter.get_stats().await;
+        assert_eq!(stats.active_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn test_background_cleanup_task() {
+        let config = RateLimiterConfig {
+            requests_per_minute: 60,
+            burst_size: 5,
+            bucket_ttl_seconds: 1, // Short TTL
+            max_buckets: 100,
+        };
+
+        let limiter = Arc::new(RateLimiter::new(config));
+
+        // Create buckets
+        assert!(limiter.check_limit("token1").await.is_ok());
+        assert!(limiter.check_limit("token2").await.is_ok());
+
+        // Start cleanup task (runs every 2 seconds)
+        RateLimiter::start_cleanup_task(Arc::clone(&limiter), 2);
+
+        // Wait for buckets to expire
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Wait for cleanup task to run
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        // Buckets should be cleaned up automatically
+        let stats = limiter.get_stats().await;
+        assert_eq!(stats.active_tokens, 0);
     }
 }
