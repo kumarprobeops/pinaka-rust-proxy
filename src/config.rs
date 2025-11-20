@@ -114,10 +114,27 @@ impl Config {
             jwt_secret.clone(),
             jwt_algorithm.clone(),
             probe_node_region.clone(),
-            jwt_issuer,
-            jwt_audience,
+            jwt_issuer.clone(),
+            jwt_audience.clone(),
         )
         .context("Failed to initialize JWT validator")?;
+
+        // Security warning: Log if issuer/audience validation is disabled
+        if jwt_issuer.is_none() || jwt_audience.is_none() {
+            tracing::warn!(
+                issuer_set = jwt_issuer.is_some(),
+                audience_set = jwt_audience.is_some(),
+                "⚠️  JWT issuer/audience validation is DISABLED. Any token signed with the correct secret will be accepted. \
+                 Set JWT_ISSUER and JWT_AUDIENCE environment variables for production deployments. \
+                 See docs/JWT_VALIDATION_DEPLOYMENT_GUIDE.md for details."
+            );
+        } else {
+            tracing::info!(
+                issuer = jwt_issuer.as_deref().unwrap(),
+                audience = jwt_audience.as_deref().unwrap(),
+                "✓ JWT validation configured with issuer and audience enforcement"
+            );
+        }
 
         // Phase 2: Initialize rate limiter
         let rate_limiter_config = RateLimiterConfig {
@@ -292,11 +309,11 @@ mod tests {
 
         let config = result.unwrap();
         assert!(
-            config.jwt_validator.expected_issuer.is_none(),
+            config.jwt_validator.expected_issuer().is_none(),
             "expected_issuer should be None when JWT_ISSUER not set"
         );
         assert!(
-            config.jwt_validator.expected_audience.is_none(),
+            config.jwt_validator.expected_audience().is_none(),
             "expected_audience should be None when JWT_AUDIENCE not set"
         );
 
@@ -317,13 +334,13 @@ mod tests {
 
         let config = result.unwrap();
         assert_eq!(
-            config.jwt_validator.expected_issuer,
-            Some("test-issuer".to_string()),
+            config.jwt_validator.expected_issuer(),
+            Some("test-issuer"),
             "expected_issuer should match JWT_ISSUER env var"
         );
         assert_eq!(
-            config.jwt_validator.expected_audience,
-            Some("test-audience".to_string()),
+            config.jwt_validator.expected_audience(),
+            Some("test-audience"),
             "expected_audience should match JWT_AUDIENCE env var"
         );
 

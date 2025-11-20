@@ -58,10 +58,8 @@ pub struct JwtValidator {
     secret: String,
     algorithm: Algorithm,
     current_region: String,
-    /// Expected issuer claim (optional for testing/validation)
-    pub expected_issuer: Option<String>,
-    /// Expected audience claim (optional for testing/validation)
-    pub expected_audience: Option<String>,
+    expected_issuer: Option<String>,
+    expected_audience: Option<String>,
 }
 
 impl JwtValidator {
@@ -87,6 +85,21 @@ impl JwtValidator {
             expected_issuer,
             expected_audience,
         })
+    }
+
+    /// Get the expected issuer (for testing/verification)
+    pub fn expected_issuer(&self) -> Option<&str> {
+        self.expected_issuer.as_deref()
+    }
+
+    /// Get the expected audience (for testing/verification)
+    pub fn expected_audience(&self) -> Option<&str> {
+        self.expected_audience.as_deref()
+    }
+
+    /// Check if issuer/audience validation is enabled
+    pub fn has_strict_validation(&self) -> bool {
+        self.expected_issuer.is_some() && self.expected_audience.is_some()
     }
 
     /// Extract Bearer token from Authorization header value
