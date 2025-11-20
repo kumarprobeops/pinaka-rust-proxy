@@ -126,10 +126,16 @@ async fn handle_request(
 }
 
 /// Handle HTTP/1.1 CONNECT requests for TLS tunneling
-async fn handle_connect(
-    mut req: Request<Incoming>,
+/// Generic over body type to allow testing with Empty<Bytes>
+async fn handle_connect<B>(
+    mut req: Request<B>,
     config: Arc<Config>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+) -> Result<Response<Full<Bytes>>, hyper::Error>
+where
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: std::error::Error + Send + Sync,
+{
     let start_time = std::time::Instant::now();
 
     // Phase 3.0: Validate CONNECT target authority
@@ -541,5 +547,213 @@ mod tests {
             std::time::Instant::now()
         ).unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // Phase 3 Integration Tests
+    // These tests exercise the full CONNECT handler flow through handle_connect()
+    // Testing: auth validation, rate limiting, authority parsing, and error responses
+
+    #[tokio::test]
+    async fn test_connect_flow_missing_auth() {
+        // Integration Test: CONNECT without Proxy-Authorization should return 407 with Bearer challenge
+        let config = create_test_config();
+
+        let mut req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("example.com:443")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = handle_connect(req, config).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+        assert!(response.headers().contains_key("proxy-authenticate"));
+        assert_eq!(
+            response.headers().get("proxy-authenticate").unwrap(),
+            "Bearer realm=\"ProbeOps Forward Proxy\""
+        );
+
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("Proxy-Authorization"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow_invalid_auth_format() {
+        // Integration Test: Malformed Proxy-Authorization should return 400
+        let config = create_test_config();
+
+        let mut req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("example.com:443")
+            .header("Proxy-Authorization", "Invalid Token Format")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = handle_connect(req, config).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("Bearer"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow_expired_token() {
+        // Integration Test: Expired JWT should return 407
+        let config = create_test_config();
+        let secret = "test_secret_key_32_chars_minimum!!";
+
+        let claims = JwtClaims {
+            token_id: "test_token_expired".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["us-east".to_string()],
+            exp: (Utc::now() - chrono::Duration::hours(1)).timestamp(),
+            iat: (Utc::now() - chrono::Duration::hours(2)).timestamp(),
+            iss: None,
+            aud: None,
+        };
+
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        let mut req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("example.com:443")
+            .header("Proxy-Authorization", format!("Bearer {}", token))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = handle_connect(req, config).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+        assert!(response.headers().contains_key("proxy-authenticate"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow_wrong_region() {
+        // Integration Test: Token with wrong region should return 403
+        let config = create_test_config();
+        let secret = "test_secret_key_32_chars_minimum!!";
+
+        // Token for eu-west, but config expects us-east
+        let token = create_test_token(secret, vec!["eu-west".to_string()]);
+
+        let mut req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("example.com:443")
+            .header("Proxy-Authorization", format!("Bearer {}", token))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = handle_connect(req, config).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("Region") || body_str.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow_wildcard_region_passes_auth() {
+        // Integration Test: Token with ["*"] should pass region check for any region
+        let config = create_test_config();
+        let secret = "test_secret_key_32_chars_minimum!!";
+
+        let token = create_test_token(secret, vec!["*".to_string()]);
+
+        let mut req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("127.0.0.1:1234") // Use unreachable address for test
+            .header("Proxy-Authorization", format!("Bearer {}", token))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = handle_connect(req, config).await.unwrap();
+
+        // Should pass auth (wildcard allows all regions)
+        // Will be 502 Bad Gateway because 127.0.0.1:1234 is unreachable
+        // But NOT 403 Forbidden or 407 Auth Required
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        assert_ne!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow_malformed_authorities() {
+        // Integration Test: Various malformed authorities should return 400
+        let config = create_test_config();
+        let secret = "test_secret_key_32_chars_minimum!!";
+        let token = create_test_token(secret, vec!["us-east".to_string()]);
+
+        let test_cases = vec![
+            ("example.com", "Missing port"),
+            (":443", "Empty host"),
+            ("example.com:abc", "Non-numeric port"),
+            ("example.com:0", "Port zero"),
+            ("example.com:99999", "Port out of range"),
+        ];
+
+        for (authority, description) in test_cases {
+            let mut req = Request::builder()
+                .method(Method::CONNECT)
+                .uri(authority)
+                .header("Proxy-Authorization", format!("Bearer {}", token))
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+
+            let response = handle_connect(req, config.clone()).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{}: Authority '{}' should return 400",
+                description,
+                authority
+            );
+
+            let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            assert!(
+                body_str.contains("Bad Request") || body_str.contains("Invalid"),
+                "{}: Should have error in body",
+                description
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow_valid_auth_attempts_upstream() {
+        // Integration Test: Valid auth + valid authority should attempt upstream connection
+        let config = create_test_config();
+        let secret = "test_secret_key_32_chars_minimum!!";
+        let token = create_test_token(secret, vec!["us-east".to_string()]);
+
+        let mut req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("127.0.0.1:1") // Unreachable address
+            .header("Proxy-Authorization", format!("Bearer {}", token))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = handle_connect(req, config).await.unwrap();
+
+        // Should pass auth (not 407) and authority validation (not 400)
+        assert_ne!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Will be 502 Bad Gateway because upstream is unreachable
+        // or 200 if upgrade somehow succeeds (shouldn't in tests)
+        assert!(
+            response.status() == StatusCode::OK
+                || response.status() == StatusCode::BAD_GATEWAY,
+            "Expected 200 or 502, got {}",
+            response.status()
+        );
     }
 }
