@@ -153,33 +153,180 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::sync::Mutex;
 
-    #[test]
-    fn test_jwt_secret_validation_empty() {
-        // Phase 2.2: Test that empty JWT_SECRET is rejected
-        let secret = "";
-        assert!(secret.trim().is_empty(), "Empty string validation");
+    // Global mutex to serialize config tests (env vars are process-global)
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    // Helper to setup minimal valid test environment
+    fn setup_test_env() {
+        env::set_var("JWT_SECRET", "valid_test_secret_32_chars_min!!");
+        env::set_var("PROBE_NODE_REGION", "test-region");
+    }
+
+    // Helper to clear test environment
+    fn clear_test_env() {
+        env::remove_var("JWT_SECRET");
+        env::remove_var("JWT_ISSUER");
+        env::remove_var("JWT_AUDIENCE");
+        env::remove_var("PROBE_NODE_REGION");
     }
 
     #[test]
-    fn test_jwt_secret_validation_whitespace_only() {
-        // Phase 2.2: Test that whitespace-only JWT_SECRET is rejected
-        let secret = "   ";
-        assert!(secret.trim().is_empty(), "Whitespace-only string validation");
+    fn test_config_from_env_rejects_empty_jwt_secret() {
+        // Phase 2.2 Integration Test: Config::from_env() should reject empty JWT_SECRET
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        env::set_var("JWT_SECRET", "");
+        env::set_var("PROBE_NODE_REGION", "test-region");
+
+        let result = Config::from_env();
+        assert!(result.is_err(), "Empty JWT_SECRET should be rejected");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("JWT_SECRET cannot be empty"),
+            "Error message should mention empty secret: {}",
+            err_msg
+        );
+
+        clear_test_env();
     }
 
     #[test]
-    fn test_jwt_secret_validation_too_short() {
-        // Phase 2.2: Test that JWT_SECRET shorter than 32 chars is rejected
-        let secret = "short_secret_12345"; // Only 19 characters
-        assert!(secret.len() < 32, "Secret should be shorter than 32 chars");
+    fn test_config_from_env_rejects_whitespace_jwt_secret() {
+        // Phase 2.2 Integration Test: Config::from_env() should reject whitespace-only JWT_SECRET
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        env::set_var("JWT_SECRET", "   ");
+        env::set_var("PROBE_NODE_REGION", "test-region");
+
+        let result = Config::from_env();
+        assert!(result.is_err(), "Whitespace-only JWT_SECRET should be rejected");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("JWT_SECRET cannot be empty"),
+            "Error message should mention empty secret: {}",
+            err_msg
+        );
+
+        clear_test_env();
     }
 
     #[test]
-    fn test_jwt_secret_validation_minimum_length() {
-        // Phase 2.2: Test that JWT_SECRET with exactly 32 chars is accepted
-        let secret = "exactly_32_characters_long_yes!!";  // Exactly 32 chars
-        assert_eq!(secret.len(), 32, "Secret should be exactly 32 chars");
-        assert!(!secret.trim().is_empty(), "Secret should not be empty");
+    fn test_config_from_env_rejects_short_jwt_secret() {
+        // Phase 2.2 Integration Test: Config::from_env() should reject JWT_SECRET < 32 chars
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        env::set_var("JWT_SECRET", "short_secret_19chars"); // 19 chars
+        env::set_var("PROBE_NODE_REGION", "test-region");
+
+        let result = Config::from_env();
+        assert!(result.is_err(), "JWT_SECRET shorter than 32 chars should be rejected");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("too short") && err_msg.contains("32 characters"),
+            "Error message should mention minimum length: {}",
+            err_msg
+        );
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_config_from_env_accepts_minimum_length_jwt_secret() {
+        // Phase 2.2 Integration Test: Config::from_env() should accept JWT_SECRET with exactly 32 chars
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        env::set_var("JWT_SECRET", "exactly_32_characters_long_yes!!"); // Exactly 32 chars
+        env::set_var("PROBE_NODE_REGION", "test-region");
+
+        let result = Config::from_env();
+        assert!(
+            result.is_ok(),
+            "JWT_SECRET with exactly 32 chars should be accepted: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        assert_eq!(config.jwt_secret, "exactly_32_characters_long_yes!!");
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_config_from_env_accepts_long_jwt_secret() {
+        // Phase 2.2 Integration Test: Config::from_env() should accept JWT_SECRET > 32 chars
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        let long_secret = "this_is_a_very_long_jwt_secret_with_more_than_32_characters_for_security";
+        env::set_var("JWT_SECRET", long_secret);
+        env::set_var("PROBE_NODE_REGION", "test-region");
+
+        let result = Config::from_env();
+        assert!(
+            result.is_ok(),
+            "JWT_SECRET longer than 32 chars should be accepted: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        assert_eq!(config.jwt_secret, long_secret);
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_config_from_env_issuer_audience_optional() {
+        // Phase 2.2 Integration Test: JWT_ISSUER and JWT_AUDIENCE should be optional
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        setup_test_env();
+
+        // Without JWT_ISSUER/JWT_AUDIENCE set
+        let result = Config::from_env();
+        assert!(result.is_ok(), "Config should succeed without JWT_ISSUER/JWT_AUDIENCE");
+
+        let config = result.unwrap();
+        assert!(
+            config.jwt_validator.expected_issuer.is_none(),
+            "expected_issuer should be None when JWT_ISSUER not set"
+        );
+        assert!(
+            config.jwt_validator.expected_audience.is_none(),
+            "expected_audience should be None when JWT_AUDIENCE not set"
+        );
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_config_from_env_issuer_audience_configured() {
+        // Phase 2.2 Integration Test: JWT_ISSUER and JWT_AUDIENCE should be configurable
+        let _lock = TEST_MUTEX.lock().unwrap();
+        clear_test_env();
+        setup_test_env();
+        env::set_var("JWT_ISSUER", "test-issuer");
+        env::set_var("JWT_AUDIENCE", "test-audience");
+
+        let result = Config::from_env();
+        assert!(result.is_ok(), "Config should succeed with JWT_ISSUER/JWT_AUDIENCE");
+
+        let config = result.unwrap();
+        assert_eq!(
+            config.jwt_validator.expected_issuer,
+            Some("test-issuer".to_string()),
+            "expected_issuer should match JWT_ISSUER env var"
+        );
+        assert_eq!(
+            config.jwt_validator.expected_audience,
+            Some("test-audience".to_string()),
+            "expected_audience should match JWT_AUDIENCE env var"
+        );
+
+        clear_test_env();
     }
 }

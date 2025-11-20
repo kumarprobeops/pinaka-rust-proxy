@@ -58,8 +58,10 @@ pub struct JwtValidator {
     secret: String,
     algorithm: Algorithm,
     current_region: String,
-    expected_issuer: Option<String>,
-    expected_audience: Option<String>,
+    /// Expected issuer claim (optional for testing/validation)
+    pub expected_issuer: Option<String>,
+    /// Expected audience claim (optional for testing/validation)
+    pub expected_audience: Option<String>,
 }
 
 impl JwtValidator {
