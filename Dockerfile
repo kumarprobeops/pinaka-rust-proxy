@@ -28,22 +28,17 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -m -u 1000 probeproxy
-
 WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/probe-proxy /app/probe-proxy
 
-# Change ownership
-RUN chown -R probeproxy:probeproxy /app
-
-# Switch to non-root user
-USER probeproxy
+# Make binary executable
+RUN chmod +x /app/probe-proxy
 
 # Expose port 443
 EXPOSE 443
 
-# Run the proxy
+# Run the proxy as root (Phase 1)
+# TODO Phase 2: Add CAP_NET_BIND_SERVICE and run as non-root user
 CMD ["/app/probe-proxy"]
