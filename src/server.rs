@@ -14,6 +14,37 @@ use crate::auth::AuthError;
 use crate::config::Config;
 use crate::rate_limiter::RateLimitError;
 
+/// Parse and validate CONNECT authority (host:port)
+/// Returns (host, port) or error message
+fn parse_authority(authority: &str) -> Result<(String, u16), String> {
+    // Split by last colon to handle IPv6 addresses like [::1]:443
+    let parts: Vec<&str> = authority.rsplitn(2, ':').collect();
+
+    if parts.len() != 2 {
+        return Err("Authority must be in host:port format".to_string());
+    }
+
+    let port_str = parts[0];
+    let host = parts[1];
+
+    // Validate host is not empty
+    if host.is_empty() {
+        return Err("Host cannot be empty".to_string());
+    }
+
+    // Parse and validate port
+    let port: u16 = port_str.parse().map_err(|_| {
+        format!("Invalid port '{}': must be a number between 1 and 65535", port_str)
+    })?;
+
+    // Validate port is in valid range (1-65535)
+    if port == 0 {
+        return Err("Invalid port: must be between 1 and 65535".to_string());
+    }
+
+    Ok((host.to_string(), port))
+}
+
 /// Serve HTTP/2 connections using direct h2 crate
 pub async fn serve_h2(
     _tls_stream: TlsStream<TcpStream>,
@@ -115,16 +146,21 @@ async fn handle_connect(
         }
     };
 
-    // Validate host:port format (basic validation)
-    if target_host.is_empty() || !target_host.contains(':') {
-        warn!("[CONNECT] Invalid authority format: {}", target_host);
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::new(Bytes::from(
-                "Bad Request: Authority must be in host:port format"
-            )))
-            .unwrap());
-    }
+    // Validate and parse host:port format
+    let (_host, _port) = match parse_authority(&target_host) {
+        Ok((h, p)) => (h, p),
+        Err(err_msg) => {
+            warn!("[CONNECT] Invalid authority {}: {}", target_host, err_msg);
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from(format!(
+                    "Bad Request: {}", err_msg
+                ))))
+                .unwrap());
+        }
+    };
+
+    // Note: target_host is used for TCP connection (already validated above)
 
     info!("[CONNECT] {} from client", target_host);
 
@@ -394,6 +430,69 @@ mod tests {
     // Note: Full integration tests for handle_request and handle_connect would require
     // setting up actual TCP connections and Hyper servers. Instead, we test the
     // error handler functions directly which cover all the critical logic paths.
+
+    #[test]
+    fn test_parse_authority_valid() {
+        // Valid host:port
+        assert_eq!(
+            parse_authority("example.com:443"),
+            Ok(("example.com".to_string(), 443))
+        );
+
+        // IPv4 with port
+        assert_eq!(
+            parse_authority("192.168.1.1:8080"),
+            Ok(("192.168.1.1".to_string(), 8080))
+        );
+
+        // IPv6 with port (simplified, real IPv6 would be [::1]:443)
+        assert_eq!(
+            parse_authority("[::1]:443"),
+            Ok(("[::1]".to_string(), 443))
+        );
+
+        // High port number
+        assert_eq!(
+            parse_authority("example.com:65535"),
+            Ok(("example.com".to_string(), 65535))
+        );
+
+        // Low port number
+        assert_eq!(
+            parse_authority("example.com:1"),
+            Ok(("example.com".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn test_parse_authority_invalid() {
+        // Missing port
+        assert!(parse_authority("example.com").is_err());
+
+        // Empty host
+        assert!(parse_authority(":443").is_err());
+
+        // Empty string
+        assert!(parse_authority("").is_err());
+
+        // Port is zero
+        assert!(parse_authority("example.com:0").is_err());
+
+        // Port is not a number
+        assert!(parse_authority("example.com:abc").is_err());
+
+        // Port out of range (too high)
+        assert!(parse_authority("example.com:65536").is_err());
+
+        // Port is negative (will fail parse)
+        assert!(parse_authority("example.com:-1").is_err());
+
+        // Multiple colons without brackets
+        assert!(parse_authority("example.com:80:443").is_ok()); // Will take last :443
+
+        // No colon separator
+        assert!(parse_authority("example_com_443").is_err());
+    }
 
     #[tokio::test]
     async fn test_handle_auth_error_messages() {
