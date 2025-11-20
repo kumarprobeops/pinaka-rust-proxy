@@ -550,4 +550,38 @@ mod tests {
         let stats = limiter.get_stats().await;
         assert_eq!(stats.active_tokens, 0);
     }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_before_too_many_tokens() {
+        // Phase 2.2: Test that expired buckets are purged before rejecting with TooManyTokens
+        let config = RateLimiterConfig {
+            requests_per_minute: 60,
+            burst_size: 5,
+            bucket_ttl_seconds: 1, // Very short TTL for testing
+            max_buckets: 3, // Low limit to trigger capacity check
+        };
+
+        let limiter = RateLimiter::new(config);
+
+        // Fill up to max capacity
+        assert!(limiter.check_limit("token1").await.is_ok());
+        assert!(limiter.check_limit("token2").await.is_ok());
+        assert!(limiter.check_limit("token3").await.is_ok());
+
+        // Verify we're at capacity
+        let stats = limiter.get_stats().await;
+        assert_eq!(stats.active_tokens, 3);
+
+        // Wait for buckets to expire
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // New token should succeed because expired buckets are cleaned up automatically
+        // Before Phase 2.2 fix, this would return TooManyTokens
+        let result = limiter.check_limit("token4").await;
+        assert!(result.is_ok(), "New token should succeed after expired buckets are purged");
+
+        // Verify old expired buckets were removed and new one was added
+        let stats = limiter.get_stats().await;
+        assert_eq!(stats.active_tokens, 1, "Should have only the new token after cleanup");
+    }
 }

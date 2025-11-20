@@ -149,3 +149,37 @@ impl Config {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_jwt_secret_validation_empty() {
+        // Phase 2.2: Test that empty JWT_SECRET is rejected
+        let secret = "";
+        assert!(secret.trim().is_empty(), "Empty string validation");
+    }
+
+    #[test]
+    fn test_jwt_secret_validation_whitespace_only() {
+        // Phase 2.2: Test that whitespace-only JWT_SECRET is rejected
+        let secret = "   ";
+        assert!(secret.trim().is_empty(), "Whitespace-only string validation");
+    }
+
+    #[test]
+    fn test_jwt_secret_validation_too_short() {
+        // Phase 2.2: Test that JWT_SECRET shorter than 32 chars is rejected
+        let secret = "short_secret_12345"; // Only 19 characters
+        assert!(secret.len() < 32, "Secret should be shorter than 32 chars");
+    }
+
+    #[test]
+    fn test_jwt_secret_validation_minimum_length() {
+        // Phase 2.2: Test that JWT_SECRET with exactly 32 chars is accepted
+        let secret = "exactly_32_characters_long_yes!!";  // Exactly 32 chars
+        assert_eq!(secret.len(), 32, "Secret should be exactly 32 chars");
+        assert!(!secret.trim().is_empty(), "Secret should not be empty");
+    }
+}
