@@ -50,9 +50,9 @@ impl Config {
             key_path: env::var("TLS_KEY_PATH")
                 .unwrap_or_else(|_| "/etc/letsencrypt/live/staging.probeops.com/privkey.pem".to_string()),
 
-            // JWT
+            // JWT (Phase 2 - optional for Phase 1)
             jwt_secret: env::var("JWT_SECRET")
-                .context("JWT_SECRET environment variable is required")?,
+                .unwrap_or_else(|_| "phase1_placeholder_secret".to_string()),
             jwt_algorithm: env::var("JWT_ALGORITHM")
                 .unwrap_or_else(|_| "HS256".to_string()),
 
@@ -74,9 +74,9 @@ impl Config {
                 .parse()
                 .context("Invalid RATE_LIMIT_MAX_BUCKETS")?,
 
-            // Backend
+            // Backend (Phase 6 - optional for Phase 1)
             backend_url: env::var("BACKEND_URL")
-                .context("BACKEND_URL environment variable is required")?,
+                .unwrap_or_else(|_| "https://staging.probeops.com".to_string()),
             probe_node_name: env::var("PROBE_NODE_NAME")
                 .unwrap_or_else(|_| "probe-node-rust".to_string()),
             probe_node_region: env::var("PROBE_NODE_REGION")
