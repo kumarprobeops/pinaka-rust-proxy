@@ -154,7 +154,9 @@ impl JwtValidator {
         let claims = token_data.claims;
 
         // Check if current region is allowed
+        // Wildcard "*" grants access to all regions
         if !claims.allowed_regions.is_empty()
+            && !claims.allowed_regions.contains(&"*".to_string())
             && !claims.allowed_regions.contains(&self.current_region)
         {
             return Err(AuthError::RegionNotAllowed(self.current_region.clone()));
@@ -388,6 +390,44 @@ mod tests {
             },
             other => panic!("Expected RegionNotAllowed, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_wildcard_region_allowed() {
+        // Test that wildcard "*" grants access to any region
+        let secret = "test_secret_key_probeops_2025";
+        let validator = JwtValidator::new(
+            secret.to_string(),
+            "HS256".to_string(),
+            "ap-south".to_string(), // Any region
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
+        ).unwrap();
+
+        // Create a token with wildcard region
+        let claims = JwtClaims {
+            token_id: "test_token_wildcard".to_string(),
+            user_id: 42,
+            allowed_regions: vec!["*".to_string()], // Wildcard grants all regions
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: chrono::Utc::now().timestamp(),
+            iss: Some("probeops".to_string()),
+            aud: Some("forward-proxy".to_string()),
+        };
+
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        // Validate with wildcard - should succeed for any region
+        let auth_header = format!("Bearer {}", token);
+        let result = validator.validate(&auth_header);
+        assert!(result.is_ok(), "Wildcard region should grant access to any region");
+
+        let validated_claims = result.unwrap();
+        assert_eq!(validated_claims.allowed_regions, vec!["*".to_string()]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use http::{Method, Request, Response, StatusCode};
-use http_body_util::Full;
+use http_body_util::{Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
@@ -100,9 +100,31 @@ async fn handle_connect(
     config: Arc<Config>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let start_time = std::time::Instant::now();
-    let target_host = req.uri().authority()
-        .map(|auth| auth.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+
+    // Phase 3.0: Validate CONNECT target authority
+    let target_host = match req.uri().authority() {
+        Some(auth) => auth.to_string(),
+        None => {
+            warn!("[CONNECT] Missing authority in CONNECT request");
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from(
+                    "Bad Request: CONNECT requires a valid host:port authority"
+                )))
+                .unwrap());
+        }
+    };
+
+    // Validate host:port format (basic validation)
+    if target_host.is_empty() || !target_host.contains(':') {
+        warn!("[CONNECT] Invalid authority format: {}", target_host);
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Full::new(Bytes::from(
+                "Bad Request: Authority must be in host:port format"
+            )))
+            .unwrap());
+    }
 
     info!("[CONNECT] {} from client", target_host);
 
@@ -114,22 +136,11 @@ async fn handle_connect(
         }
     };
 
-    debug!("[CONNECT] Authenticated user_id={}, token_id={}",
-        claims.user_id, claims.token_id);
+    debug!("[CONNECT] Authenticated user_id={}, token_id={}, allowed_regions={:?}",
+        claims.user_id, claims.token_id, claims.allowed_regions);
 
-    // Phase 3.2: Region Access Validation
-    if !claims.allowed_regions.contains(&config.probe_node_region)
-        && !claims.allowed_regions.contains(&"*".to_string()) {
-        warn!("[CONNECT] Region access denied for {} - allowed: {:?}, current: {}",
-            target_host, claims.allowed_regions, config.probe_node_region);
-
-        return Ok(Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .body(Full::new(Bytes::from(
-                "Access denied: Region not in allowed list"
-            )))
-            .unwrap());
-    }
+    // Note: Region validation is now handled in JwtValidator::validate()
+    // which checks for wildcard "*" or specific region match
 
     // Phase 3.3: Rate Limiting
     match config.rate_limiter.check_limit(&claims.token_id).await {
@@ -267,10 +278,11 @@ fn handle_auth_error(
         .unwrap();
 
     // Add Proxy-Authenticate header for 407 responses (required for proper proxy auth)
+    // Use Bearer scheme to match JWT authentication (RFC 7235)
     if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         response.headers_mut().insert(
             "Proxy-Authenticate",
-            "Basic realm=\"ProbeOps Forward Proxy\"".parse().unwrap(),
+            "Bearer realm=\"ProbeOps Forward Proxy\"".parse().unwrap(),
         );
     }
 
@@ -315,11 +327,120 @@ fn handle_rate_limit_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use http_body_util::BodyExt;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use crate::auth::{JwtClaims, JwtValidator};
+    use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+
+    // Helper to create a test config
+    fn create_test_config() -> Arc<Config> {
+        let jwt_validator = Arc::new(JwtValidator::new(
+            "test_secret_key_32_chars_minimum!!".to_string(),
+            "HS256".to_string(),
+            "us-east".to_string(),
+            None, // No issuer validation in tests
+            None, // No audience validation in tests
+        ).unwrap());
+
+        let rate_limiter_config = RateLimiterConfig {
+            requests_per_minute: 60,
+            burst_size: 10,
+            bucket_ttl_seconds: 60,
+            max_buckets: 100,
+        };
+        let rate_limiter = Arc::new(RateLimiter::new(rate_limiter_config));
+
+        Arc::new(Config {
+            host: "127.0.0.1".to_string(),
+            port: 443,
+            cert_path: "".to_string(),
+            key_path: "".to_string(),
+            jwt_secret: "test_secret_key_32_chars_minimum!!".to_string(),
+            jwt_algorithm: "HS256".to_string(),
+            rate_limit_requests_per_minute: 60,
+            rate_limit_burst_size: 10,
+            rate_limit_bucket_ttl_seconds: 60,
+            rate_limit_max_buckets: 100,
+            backend_url: "http://localhost:8000".to_string(),
+            probe_node_name: "test-node".to_string(),
+            probe_node_region: "us-east".to_string(),
+            log_batch_size: 100,
+            log_batch_interval_secs: 5,
+            jwt_validator,
+            rate_limiter,
+        })
+    }
+
+    // Helper to create a valid JWT token
+    fn create_test_token(secret: &str, allowed_regions: Vec<String>) -> String {
+        let claims = JwtClaims {
+            token_id: "test_token_123".to_string(),
+            user_id: 42,
+            allowed_regions,
+            exp: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: Utc::now().timestamp(),
+            iss: None,
+            aud: None,
+        };
+
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap()
+    }
+
+    // Note: Full integration tests for handle_request and handle_connect would require
+    // setting up actual TCP connections and Hyper servers. Instead, we test the
+    // error handler functions directly which cover all the critical logic paths.
 
     #[tokio::test]
-    async fn test_server_placeholder() {
-        // Placeholder test
-        // Real tests will be added when handlers are implemented
-        assert!(true);
+    async fn test_handle_auth_error_messages() {
+        // Test that error messages are descriptive
+        let error = AuthError::MissingHeader;
+        let response = handle_auth_error(error, "example.com:443", std::time::Instant::now()).unwrap();
+        assert_eq!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+
+        let error = AuthError::InvalidFormat;
+        let response = handle_auth_error(error, "example.com:443", std::time::Instant::now()).unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let error = AuthError::TokenExpired;
+        let response = handle_auth_error(error, "example.com:443", std::time::Instant::now()).unwrap();
+        assert_eq!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+
+        let error = AuthError::ValidationFailed("test".to_string());
+        let response = handle_auth_error(error, "example.com:443", std::time::Instant::now()).unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let error = AuthError::RegionNotAllowed("us-west".to_string());
+        let response = handle_auth_error(error, "example.com:443", std::time::Instant::now()).unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_handle_rate_limit_errors() {
+        use crate::rate_limiter::RateLimitError;
+
+        // Test LimitExceeded error
+        let error = RateLimitError::LimitExceeded("Rate limit exceeded".to_string());
+        let response = handle_rate_limit_error(
+            error,
+            "example.com:443",
+            "test_token",
+            std::time::Instant::now()
+        ).unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Test TooManyTokens error
+        let error = RateLimitError::TooManyTokens(1000);
+        let response = handle_rate_limit_error(
+            error,
+            "example.com:443",
+            "test_token",
+            std::time::Instant::now()
+        ).unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
