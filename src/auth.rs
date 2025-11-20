@@ -64,7 +64,13 @@ pub struct JwtValidator {
 
 impl JwtValidator {
     /// Create a new JWT validator
-    pub fn new(secret: String, algorithm: String, current_region: String) -> Result<Self> {
+    pub fn new(
+        secret: String,
+        algorithm: String,
+        current_region: String,
+        expected_issuer: Option<String>,
+        expected_audience: Option<String>,
+    ) -> Result<Self> {
         let algo = match algorithm.to_uppercase().as_str() {
             "HS256" => Algorithm::HS256,
             "HS384" => Algorithm::HS384,
@@ -76,8 +82,8 @@ impl JwtValidator {
             secret,
             algorithm: algo,
             current_region,
-            expected_issuer: Some("probeops".to_string()),
-            expected_audience: Some("forward-proxy".to_string()),
+            expected_issuer,
+            expected_audience,
         })
     }
 
@@ -191,6 +197,8 @@ mod tests {
             "test_secret".to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         );
         assert!(validator.is_ok());
         let validator = validator.unwrap();
@@ -198,9 +206,11 @@ mod tests {
         assert_eq!(validator.expected_audience, Some("forward-proxy".to_string()));
 
         let validator = JwtValidator::new(
-            "test_secret".to_string(),
+            "test_secret_long_enough_for_testing".to_string(),
             "INVALID".to_string(),
             "us-east".to_string(),
+            None,
+            None,
         );
         assert!(validator.is_err());
     }
@@ -212,6 +222,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         // Create a valid token
@@ -247,6 +259,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         // Create an expired token (1 hour ago)
@@ -285,6 +299,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         // Create a token with different secret
@@ -324,6 +340,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "ap-south".to_string(), // Different region
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         // Create a token that only allows us-east and eu-west
@@ -363,6 +381,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         // Create a token with wrong issuer
@@ -401,6 +421,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         // Create a token with wrong audience
@@ -439,6 +461,8 @@ mod tests {
             secret.to_string(),
             "HS256".to_string(),
             "us-east".to_string(),
+            Some("probeops".to_string()),
+            Some("forward-proxy".to_string()),
         ).unwrap();
 
         let claims = JwtClaims {

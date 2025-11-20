@@ -57,8 +57,24 @@ impl Config {
 
         let jwt_secret = env::var("JWT_SECRET")
             .context("JWT_SECRET environment variable is required for authentication")?;
+
+        // Validate JWT_SECRET is not empty or too short
+        if jwt_secret.trim().is_empty() {
+            return Err(anyhow::anyhow!("JWT_SECRET cannot be empty"));
+        }
+        if jwt_secret.len() < 32 {
+            return Err(anyhow::anyhow!(
+                "JWT_SECRET is too short ({} chars). Minimum 32 characters recommended for security.",
+                jwt_secret.len()
+            ));
+        }
+
         let jwt_algorithm = env::var("JWT_ALGORITHM")
             .unwrap_or_else(|_| "HS256".to_string());
+
+        // Optional issuer and audience validation
+        let jwt_issuer = env::var("JWT_ISSUER").ok();
+        let jwt_audience = env::var("JWT_AUDIENCE").ok();
 
         let rate_limit_requests_per_minute = env::var("RATE_LIMIT_REQUESTS_PER_MINUTE")
             .unwrap_or_else(|_| "10000".to_string())
@@ -98,6 +114,8 @@ impl Config {
             jwt_secret.clone(),
             jwt_algorithm.clone(),
             probe_node_region.clone(),
+            jwt_issuer,
+            jwt_audience,
         )
         .context("Failed to initialize JWT validator")?;
 

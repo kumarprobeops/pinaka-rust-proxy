@@ -177,13 +177,33 @@ impl RateLimiter {
                 // First request from this token
                 debug!("Creating new token bucket for {}", token_id);
 
-                // Check if we've hit max buckets limit before evicting active tokens
+                // Check if we've hit max buckets limit
                 if buckets.len() >= self.config.max_buckets {
-                    warn!(
-                        "Max token buckets reached ({}). Rejecting new token to prevent eviction of active buckets.",
-                        self.config.max_buckets
-                    );
-                    return Err(RateLimitError::TooManyTokens(self.config.max_buckets));
+                    // Before rejecting, try to clean up expired buckets to free space
+                    let mut expired_tokens = Vec::new();
+                    for (tid, bucket) in buckets.iter() {
+                        if bucket.is_expired() {
+                            expired_tokens.push(tid.clone());
+                        }
+                    }
+
+                    // Remove expired buckets
+                    for tid in &expired_tokens {
+                        buckets.pop(tid);
+                    }
+
+                    if !expired_tokens.is_empty() {
+                        debug!("Cleaned up {} expired buckets to free space", expired_tokens.len());
+                    }
+
+                    // Recheck capacity after cleanup
+                    if buckets.len() >= self.config.max_buckets {
+                        warn!(
+                            "Max token buckets reached ({}) even after cleanup. Rejecting new token.",
+                            self.config.max_buckets
+                        );
+                        return Err(RateLimitError::TooManyTokens(self.config.max_buckets));
+                    }
                 }
 
                 // Create new bucket
