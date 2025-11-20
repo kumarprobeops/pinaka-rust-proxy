@@ -8,6 +8,8 @@ mod config;
 mod tls;
 mod server;
 mod reload;
+mod auth;           // Phase 2: JWT authentication
+mod rate_limiter;   // Phase 2: Rate limiting
 
 use config::Config;
 use reload::ReloadableTlsAcceptor;
@@ -44,7 +46,7 @@ async fn main() -> Result<()> {
 
     // Setup signal handlers
     let tls_acceptor_for_reload = tls_acceptor.clone();
-    let reload_handle = tokio::spawn(async move {
+    let _reload_handle = tokio::spawn(async move {
         reload_signal_handler(tls_acceptor_for_reload).await;
     });
 
