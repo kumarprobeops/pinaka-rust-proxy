@@ -232,6 +232,8 @@ async fn handle_h2_http_request(
         "te", // Except "trailers"
     ];
 
+    debug!("[H2 HTTP] Request headers received: {:?}", request_headers);
+
     for (name, value) in request_headers.iter() {
         let name_str = name.as_str();
 
@@ -247,15 +249,15 @@ async fn handle_h2_http_request(
 
         // Forward all other headers
         if let Ok(header_value) = value.to_str() {
+            debug!("[H2 HTTP] Forwarding header: {}: {}", name_str, header_value);
             upstream_req = upstream_req.header(name_str, header_value);
         }
     }
 
     // Ensure Host header is set (required by HTTP/1.1)
-    // If not present in original headers, set it from authority
-    if !request_headers.contains_key("host") {
-        upstream_req = upstream_req.header("host", authority);
-    }
+    // Always set from authority since HTTP/2 uses :authority pseudo-header
+    upstream_req = upstream_req.header("host", authority);
+    debug!("[H2 HTTP] Set Host header to: {}", authority);
 
     // Phase 9: Send request to upstream
     let upstream_response = match upstream_req.send().await {
