@@ -323,7 +323,7 @@ async fn handle_h2_auth_error(
     if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         response = response.header(
             "proxy-authenticate",
-            "Bearer realm=\"ProbeOps Forward Proxy\""
+            "Basic realm=\"ProbeOps Forward Proxy\""
         );
     }
 
