@@ -197,8 +197,10 @@ async fn handle_h2_http_request(
     }
 
     // Phase 6: Build upstream HTTP client
+    // Disable automatic redirect following to avoid redirect loops when sites redirect HTTP→HTTPS
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
