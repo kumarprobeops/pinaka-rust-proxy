@@ -5,6 +5,8 @@ use std::sync::Arc;
 use crate::auth::{JwtValidator, SharedJwtValidator};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, SharedRateLimiter};
 use crate::logger::{RequestLogger, SharedRequestLogger};
+use crate::destination_filter::DestinationFilter;
+use crate::ip_tracker::IpTracker;
 
 #[derive(Debug)]
 pub struct Config {
@@ -39,6 +41,28 @@ pub struct Config {
     pub jwt_validator: SharedJwtValidator,
     pub rate_limiter: SharedRateLimiter,
     pub request_logger: SharedRequestLogger,
+
+    // HTTP Forwarding configuration
+    pub http_proxy_enabled: bool,
+    pub max_request_body_size: usize,
+    pub max_response_body_size: usize,
+    pub connect_timeout_seconds: u64,
+    pub read_timeout_seconds: u64,
+    pub write_timeout_seconds: u64,
+
+    // DNS configuration
+    pub dns_cache_size: usize,
+    pub dns_cache_ttl_seconds: u64,
+    pub dns_resolver_timeout_seconds: u64,
+
+    // IP tracking configuration
+    pub max_ips_per_token: usize,
+    pub ip_tracker_cache_size: usize,
+    pub ip_tracker_ttl_seconds: u64,
+
+    // SSRF protection and IP tracking components
+    pub destination_filter: Arc<DestinationFilter>,
+    pub ip_tracker: Arc<IpTracker>,
 }
 
 impl Config {
@@ -111,6 +135,60 @@ impl Config {
             .parse()
             .context("Invalid LOG_BATCH_INTERVAL_SECS")?;
 
+        // HTTP Forwarding configuration
+        let http_proxy_enabled = env::var("HTTP_PROXY_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .context("Invalid HTTP_PROXY_ENABLED")?;
+        let max_request_body_size = env::var("MAX_REQUEST_BODY_SIZE")
+            .unwrap_or_else(|_| "104857600".to_string()) // 100MB default
+            .parse()
+            .context("Invalid MAX_REQUEST_BODY_SIZE")?;
+        let max_response_body_size = env::var("MAX_RESPONSE_BODY_SIZE")
+            .unwrap_or_else(|_| "104857600".to_string()) // 100MB default
+            .parse()
+            .context("Invalid MAX_RESPONSE_BODY_SIZE")?;
+        let connect_timeout_seconds = env::var("CONNECT_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .context("Invalid CONNECT_TIMEOUT_SECONDS")?;
+        let read_timeout_seconds = env::var("READ_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .context("Invalid READ_TIMEOUT_SECONDS")?;
+        let write_timeout_seconds = env::var("WRITE_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .context("Invalid WRITE_TIMEOUT_SECONDS")?;
+
+        // DNS configuration
+        let dns_cache_size = env::var("DNS_CACHE_SIZE")
+            .unwrap_or_else(|_| "5000".to_string())
+            .parse()
+            .context("Invalid DNS_CACHE_SIZE")?;
+        let dns_cache_ttl_seconds = env::var("DNS_CACHE_TTL_SECONDS")
+            .unwrap_or_else(|_| "60".to_string())
+            .parse()
+            .context("Invalid DNS_CACHE_TTL_SECONDS")?;
+        let dns_resolver_timeout_seconds = env::var("DNS_RESOLVER_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .context("Invalid DNS_RESOLVER_TIMEOUT_SECONDS")?;
+
+        // IP tracking configuration
+        let max_ips_per_token = env::var("MAX_IPS_PER_TOKEN")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .context("Invalid MAX_IPS_PER_TOKEN")?;
+        let ip_tracker_cache_size = env::var("IP_TRACKER_CACHE_SIZE")
+            .unwrap_or_else(|_| "10000".to_string())
+            .parse()
+            .context("Invalid IP_TRACKER_CACHE_SIZE")?;
+        let ip_tracker_ttl_seconds = env::var("IP_TRACKER_TTL_SECONDS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()
+            .context("Invalid IP_TRACKER_TTL_SECONDS")?;
+
         // Phase 2: Initialize JWT validator
         let jwt_validator = JwtValidator::new(
             jwt_secret.clone(),
@@ -156,6 +234,20 @@ impl Config {
             log_batch_interval_secs,
         );
 
+        // Initialize destination filter (SSRF protection)
+        let destination_filter = DestinationFilter::new(
+            dns_cache_size,
+            dns_cache_ttl_seconds,
+            dns_resolver_timeout_seconds,
+        ).context("Failed to initialize destination filter")?;
+
+        // Initialize IP tracker
+        let ip_tracker = IpTracker::new(
+            max_ips_per_token,
+            ip_tracker_cache_size,
+            ip_tracker_ttl_seconds,
+        );
+
         Ok(Config {
             host,
             port,
@@ -175,6 +267,20 @@ impl Config {
             jwt_validator: Arc::new(jwt_validator),
             rate_limiter: Arc::new(rate_limiter),
             request_logger: Arc::new(request_logger),
+            http_proxy_enabled,
+            max_request_body_size,
+            max_response_body_size,
+            connect_timeout_seconds,
+            read_timeout_seconds,
+            write_timeout_seconds,
+            dns_cache_size,
+            dns_cache_ttl_seconds,
+            dns_resolver_timeout_seconds,
+            max_ips_per_token,
+            ip_tracker_cache_size,
+            ip_tracker_ttl_seconds,
+            destination_filter: Arc::new(destination_filter),
+            ip_tracker: Arc::new(ip_tracker),
         })
     }
 }

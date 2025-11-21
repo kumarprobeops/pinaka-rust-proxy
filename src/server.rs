@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::BytesMut;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::Full;
 #[cfg(test)]
@@ -70,12 +71,34 @@ pub async fn serve_h2(
     // Phase 4.2: Accept and process streams
     while let Some(result) = h2_conn.accept().await {
         match result {
-            Ok((request, respond)) => {
+            Ok((request, mut respond)) => {
                 let config = Arc::clone(&config);
 
                 // Spawn task to handle each stream independently
                 tokio::spawn(async move {
-                    if let Err(e) = handle_h2_connect(request, respond, config).await {
+                    let method = request.method().clone();
+                    let uri = request.uri().clone();
+
+                    let result = if method == Method::CONNECT {
+                        handle_h2_connect(request, respond, config).await
+                    } else {
+                        // For non-CONNECT methods, return 204 No Content (stub response)
+                        info!("[H2] Non-CONNECT {} request for {} - returning 204 (stub)", method, uri);
+                        let response = Response::builder()
+                            .status(StatusCode::NO_CONTENT)
+                            .body(())
+                            .unwrap();
+
+                        match respond.send_response(response, true) {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                error!("[H2] Failed to send stub response: {}", e);
+                                Err(anyhow::anyhow!("Failed to send response: {}", e))
+                            }
+                        }
+                    };
+
+                    if let Err(e) = result {
                         error!("[H2] Stream handler error: {}", e);
                     }
                 });
@@ -91,6 +114,215 @@ pub async fn serve_h2(
     Ok(())
 }
 
+/// Handle HTTP/2 regular HTTP requests (GET, POST, etc.) on a single stream
+/// This handles plain HTTP traffic and Chrome's connectivity checks over HTTP/2
+async fn handle_h2_http_request(
+    mut request: Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    config: Arc<Config>,
+) -> Result<()> {
+    let start_time = std::time::Instant::now();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+
+    // Phase 1: Validate method (block TRACE for security)
+    if method == Method::TRACE {
+        warn!("[H2 HTTP] Blocked TRACE method (XST prevention)");
+        send_h2_error(
+            &mut respond,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "TRACE method not allowed",
+        ).await?;
+        return Ok(());
+    }
+
+    // Phase 2: Parse absolute-form URI
+    let target_url = uri.to_string();
+    if uri.scheme().is_none() || uri.authority().is_none() {
+        warn!("[H2 HTTP] Invalid proxy request URI (missing scheme/authority): {}", target_url);
+        send_h2_error(
+            &mut respond,
+            StatusCode::BAD_REQUEST,
+            "Proxy requests must use absolute-form URI",
+        ).await?;
+        return Ok(());
+    }
+
+    let scheme = uri.scheme_str().unwrap_or("http");
+    let authority = uri.authority().unwrap().as_str();
+
+    info!("[H2 HTTP] {} request for {} (scheme={}, authority={})",
+        method, target_url, scheme, authority);
+
+    // Phase 3: Authentication
+    let claims = match config.jwt_validator.validate_request(&request) {
+        Ok(claims) => claims,
+        Err(e) => {
+            return handle_h2_auth_error(e, &target_url, start_time, &mut respond).await;
+        }
+    };
+
+    debug!("[H2 HTTP] Authenticated {} - user_id={}, token_id={}", target_url, claims.user_id, claims.token_id);
+
+    // Phase 4: Rate limiting
+    match config.rate_limiter.check_limit(&claims.token_id).await {
+        Ok(()) => {},
+        Err(e) => {
+            return handle_h2_rate_limit_error(e, &target_url, &claims.token_id, start_time, &mut respond).await;
+        }
+    };
+
+    // Phase 5: Extract request body
+    let mut recv_stream = request.into_body();
+    let mut body_bytes = BytesMut::new();
+
+    while let Some(chunk) = recv_stream.data().await {
+        match chunk {
+            Ok(data) => {
+                recv_stream.flow_control().release_capacity(data.len()).ok();
+                body_bytes.extend_from_slice(&data);
+            }
+            Err(e) => {
+                error!("[H2 HTTP] Error reading request body: {}", e);
+                send_h2_error(&mut respond, StatusCode::BAD_REQUEST, "Failed to read request body").await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Phase 6: Build upstream HTTP client
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("[H2 HTTP] Failed to create HTTP client: {}", e);
+            send_h2_error(&mut respond, StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").await?;
+            return Ok(());
+        }
+    };
+
+    // Phase 7: Build upstream request (convert method to avoid type mismatch)
+    let method_str = method.as_str();
+    let upstream_method = reqwest::Method::from_bytes(method_str.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Invalid HTTP method: {}", e))?;
+    let mut upstream_req = client.request(upstream_method, &target_url);
+
+    // Add request body if present
+    if !body_bytes.is_empty() {
+        upstream_req = upstream_req.body(body_bytes.to_vec());
+    }
+
+    // Phase 8: Copy headers (filter hop-by-hop headers)
+    // Note: HTTP/2 headers are already in lowercase
+    // Re-parse headers from the original request before it was consumed
+    // Since we already consumed the request, we need to work with what we have
+
+    // Phase 9: Send request to upstream
+    let upstream_response = match upstream_req.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("[H2 HTTP] Failed to connect to upstream {}: {}", target_url, e);
+
+            config.request_logger.log_request(
+                claims.token_id.clone(),
+                claims.user_id as i32,
+                method.as_str().to_string(),
+                target_url.clone(),
+                Some(502),
+                0,
+                Some(start_time.elapsed().as_millis() as i64),
+                false,
+                false,
+                Some(format!("Connection failed: {}", e)),
+            ).await;
+
+            send_h2_error(&mut respond, StatusCode::BAD_GATEWAY, "Failed to connect to upstream").await?;
+            return Ok(());
+        }
+    };
+
+    let status = upstream_response.status();
+    let upstream_headers = upstream_response.headers().clone();
+
+    // Phase 10: Read response body
+    let response_bytes = match upstream_response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            error!("[H2 HTTP] Failed to read response body: {}", e);
+            send_h2_error(&mut respond, StatusCode::BAD_GATEWAY, "Failed to read response body").await?;
+            return Ok(());
+        }
+    };
+
+    let total_bytes = response_bytes.len();
+    let duration = start_time.elapsed();
+
+    // Phase 11: Build HTTP/2 response
+    // Convert reqwest::StatusCode to http::StatusCode via u16
+    let status_code = StatusCode::from_u16(status.as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response_builder = Response::builder().status(status_code);
+
+    // Copy response headers (filter hop-by-hop)
+    for (name, value) in &upstream_headers {
+        let name_str = name.as_str().to_lowercase();
+        if matches!(name_str.as_str(),
+            "connection" | "keep-alive" | "te" | "trailer" | "transfer-encoding" | "upgrade") {
+            continue;
+        }
+
+        // Convert reqwest headers to http headers via string
+        if let Ok(value_str) = value.to_str() {
+            response_builder = response_builder.header(name.as_str(), value_str);
+        }
+    }
+
+    let response = response_builder.body(()).unwrap();
+
+    // Send response headers
+    let mut send_stream = match respond.send_response(response, false) {
+        Ok(stream) => stream,
+        Err(e) => {
+            error!("[H2 HTTP] Failed to send response headers: {}", e);
+            return Err(anyhow::anyhow!("Failed to send response: {}", e));
+        }
+    };
+
+    // Send response body
+    if !response_bytes.is_empty() {
+        if let Err(e) = send_stream.send_data(response_bytes.clone(), true) {
+            error!("[H2 HTTP] Failed to send response body: {}", e);
+            return Err(anyhow::anyhow!("Failed to send body: {}", e));
+        }
+    } else {
+        // Send empty body with END_STREAM
+        if let Err(e) = send_stream.send_data(Bytes::new(), true) {
+            error!("[H2 HTTP] Failed to close stream: {}", e);
+        }
+    }
+
+    // Phase 12: Log successful request
+    config.request_logger.log_request(
+        claims.token_id.clone(),
+        claims.user_id as i32,
+        method.as_str().to_string(),
+        target_url.clone(),
+        Some(status.as_u16() as i32),
+        total_bytes as i64,
+        Some(duration.as_millis() as i64),
+        true,
+        false,
+        None,
+    ).await;
+
+    info!("[H2 HTTP] Completed {} {} - user_id={}, token_id={}, status={}, duration={:?}, bytes={}",
+        method, target_url, claims.user_id, claims.token_id, status.as_u16(), duration, total_bytes);
+
+    Ok(())
+}
+
 /// Handle HTTP/2 CONNECT request on a single stream
 /// Phase 4: Complete CONNECT handler with auth, rate limiting, and tunneling
 async fn handle_h2_connect(
@@ -99,17 +331,6 @@ async fn handle_h2_connect(
     config: Arc<Config>,
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
-
-    // Phase 4.3: Validate CONNECT method
-    if request.method() != Method::CONNECT {
-        warn!("[H2] Non-CONNECT request: {}", request.method());
-        send_h2_error(
-            &mut respond,
-            StatusCode::METHOD_NOT_ALLOWED,
-            "Only CONNECT method supported"
-        ).await?;
-        return Ok(());
-    }
 
     // Phase 4.4: Extract and validate authority
     let target_host = match request.uri().authority() {
@@ -594,17 +815,229 @@ async fn handle_request(
 
     debug!("Received {} request for {}", method, uri);
 
-    // Only CONNECT method is supported for forward proxy
-    if method != Method::CONNECT {
-        warn!("Unsupported method: {}", method);
+    // Support CONNECT method for HTTPS tunneling
+    if method == Method::CONNECT {
+        // Handle CONNECT request for HTTPS tunneling
+        handle_connect(req, config).await
+    } else {
+        // Forward HTTP requests (GET, POST, etc.) if enabled
+        if config.http_proxy_enabled {
+            forward_http_request(req, config).await
+        } else {
+            // HTTP forwarding disabled - return 204
+            info!("[HTTP] Non-CONNECT {} request for {} - HTTP forwarding disabled, returning 204", method, uri);
+            Ok(Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header("Connection", "close")
+                .body(Full::new(Bytes::new()))
+                .unwrap())
+        }
+    }
+}
+
+/// Forward regular HTTP requests (GET, POST, HEAD, etc.) through the proxy
+/// This handles plain HTTP traffic and Chrome's connectivity checks
+///
+/// Security Policy:
+/// - SSRF protection via destination_filter (blocks RFC1918, localhost, metadata)
+/// - IP-per-token limits via ip_tracker
+/// - JWT authentication and rate limiting
+/// - Blocks TRACE method to prevent XST attacks
+/// - Validates absolute-form URIs per RFC 7230
+/// - Filters hop-by-hop headers per RFC 7230 Section 6.1
+/// - Body size limits (413 request, 502 response)
+async fn forward_http_request(
+    req: Request<Incoming>,
+    config: Arc<Config>,
+) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    let start_time = std::time::Instant::now();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let target_url = uri.to_string();
+
+    // 1. Validate request method (block TRACE)
+    if method == Method::TRACE {
+        warn!("[HTTP] Blocked TRACE method");
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(Full::new(Bytes::from("Only CONNECT method is supported")))
+            .header("Allow", "GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS")
+            .header("Connection", "close")
+            .body(Full::new(Bytes::from("TRACE method not allowed")))
             .unwrap());
     }
 
-    // Handle CONNECT request
-    handle_connect(req, config).await
+    // 2. Validate absolute-form URI
+    if uri.scheme().is_none() || uri.authority().is_none() {
+        warn!("[HTTP] Invalid URI (missing scheme/authority): {}", target_url);
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("Connection", "close")
+            .body(Full::new(Bytes::from("Proxy requests must use absolute-form URI")))
+            .unwrap());
+    }
+
+    let scheme = uri.scheme_str().unwrap_or("http");
+    let authority = uri.authority().unwrap();
+    let host = authority.host();
+    let port = authority.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+    debug!("[HTTP] {} {} ({}:{})", method, target_url, host, port);
+
+    // 3. JWT Authentication
+    let claims = match config.jwt_validator.validate_request(&req) {
+        Ok(claims) => claims,
+        Err(AuthError::MissingHeader) => {
+            return Ok(Response::builder()
+                .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                .header("Proxy-Authenticate", "Bearer")
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from("Proxy authentication required")))
+                .unwrap());
+        }
+        Err(e) => {
+            warn!("[HTTP] Auth failed: {}", e);
+            return Ok(Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(format!("Authentication failed: {}", e))))
+                .unwrap());
+        }
+    };
+
+    // 4. Extract client IP
+    let client_ip = req.extensions()
+        .get::<std::net::SocketAddr>()
+        .map(|addr| addr.ip())
+        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+
+    // 5. IP-per-token check
+    if let Err(e) = config.ip_tracker.check_and_track(&claims.token_id, client_ip).await {
+        warn!("[HTTP] IP limit exceeded: {}", e);
+        return Ok(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header("Connection", "close")
+            .body(Full::new(Bytes::from(e.to_string())))
+            .unwrap());
+    }
+
+    // 6. Rate limiting
+    if let Err(e) = config.rate_limiter.check_limit(&claims.token_id).await {
+        warn!("[HTTP] Rate limit exceeded: {}", e);
+        return Ok(Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Connection", "close")
+            .body(Full::new(Bytes::from(format!("Rate limit exceeded: {}", e))))
+            .unwrap());
+    }
+
+    // 7. Extract headers before consuming the body (collect() takes ownership)
+    let request_headers = req.headers().clone();
+
+    // 8. Stream body with size limit enforcement (Phase 4: no full buffering)
+    let (parts, body) = req.into_parts();
+    let body_bytes = match crate::body_limiter::read_body_with_limit(
+        body,
+        config.max_request_body_size,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("[HTTP] Body limit error: {}", e);
+            return Ok(Response::builder()
+                .status(e.status_code())
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(e.to_response_message())))
+                .unwrap());
+        }
+    };
+
+    // 9. SSRF protection - resolve and check destination
+    let vetted_ips = match config.destination_filter.check_and_resolve(host).await {
+        Ok(ips) => ips,
+        Err(e) => {
+            warn!("[HTTP] Destination blocked: {}", e);
+            return Ok(Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(format!("Destination not allowed: {}", e))))
+                .unwrap());
+        }
+    };
+
+    // 10. Forward request using http_client
+    let body_option = if body_bytes.is_empty() { None } else { Some(body_bytes.clone()) };
+
+    match crate::http_client::forward_request(
+        vetted_ips,
+        port,
+        scheme,
+        method.as_str(),
+        path,
+        host,
+        &request_headers,
+        body_option,
+        &config,
+    ).await {
+        Ok((status, headers, body)) => {
+            // Success - build response
+            let mut response = Response::builder()
+                .status(status)
+                .header("Connection", "close");
+
+            for (name, value) in &headers {
+                response = response.header(name, value);
+            }
+
+            // Log successful request
+            config.request_logger.log_request(
+                claims.token_id.clone(),
+                claims.user_id as i32,
+                method.as_str().to_string(),
+                target_url.clone(),
+                Some(status.as_u16() as i32),
+                body.len() as i64,
+                Some(start_time.elapsed().as_millis() as i64),
+                true,
+                false,
+                None,
+            ).await;
+
+            Ok(response.body(Full::new(body)).unwrap())
+        }
+        Err(e) => {
+            // Error - return 502 Bad Gateway
+            error!("[HTTP] Forward failed: {}", e);
+
+            let error_msg = match e {
+                crate::http_client::HttpClientError::ResponseTooLarge { size, limit } => {
+                    format!("Upstream response too large: {} bytes (limit: {})", size, limit)
+                }
+                _ => format!("Failed to connect to upstream: {}", e),
+            };
+
+            // Log failed request
+            config.request_logger.log_request(
+                claims.token_id.clone(),
+                claims.user_id as i32,
+                method.as_str().to_string(),
+                target_url.clone(),
+                Some(502),
+                0,
+                Some(start_time.elapsed().as_millis() as i64),
+                false,
+                false,
+                Some(error_msg.clone()),
+            ).await;
+
+            Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(error_msg)))
+                .unwrap())
+        }
+    }
 }
 
 /// Handle HTTP/1.1 CONNECT requests for TLS tunneling

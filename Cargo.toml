@@ -3,6 +3,10 @@ name = "probe-proxy"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "pinaka_rust_proxy"
+path = "src/lib.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full", "signal"] }
@@ -57,8 +61,17 @@ lru = "0.12"
 # Configuration
 dotenv = "0.15"
 
-# HTTP client (for upstream connections)
+# HTTP client (for upstream connections - backend API only)
 reqwest = { version = "0.11", features = ["json"] }
+
+# HTTP forwarding dependencies
+httparse = "1.8"
+webpki-roots = "0.26"
+rand = "0.8"
+
+# DNS and SSRF protection
+trust-dns-resolver = "0.23"
+ipnetwork = "0.20"
 
 [dev-dependencies]
 # For h2 client test harness

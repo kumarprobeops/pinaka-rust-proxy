@@ -8,9 +8,14 @@ mod config;
 mod tls;
 mod server;
 mod reload;
-mod auth;           // Phase 2: JWT authentication
-mod rate_limiter;   // Phase 2: Rate limiting
-mod logger;         // Request logging to backend
+mod auth;                // Phase 2: JWT authentication
+mod rate_limiter;        // Phase 2: Rate limiting
+mod logger;              // Request logging to backend
+mod destination_filter;  // SSRF protection
+mod ip_tracker;          // IP-per-token limits
+mod http_client;         // Minimal HTTP client (TcpStream + httparse)
+mod body_limiter;        // Streaming body size enforcement
+mod http_metrics;        // Prometheus metrics for HTTP forwarding
 
 use config::Config;
 use reload::ReloadableTlsAcceptor;
