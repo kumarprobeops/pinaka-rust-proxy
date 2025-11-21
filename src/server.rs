@@ -241,23 +241,31 @@ async fn handle_h2_connect(
 }
 
 /// Send error response for HTTP/2 stream
+/// Phase 4 Audit Fix: Add descriptive error bodies matching HTTP/1.1 behavior
 async fn send_h2_error(
     respond: &mut h2::server::SendResponse<Bytes>,
     status: StatusCode,
-    _message: &str,
+    message: &str,
 ) -> Result<()> {
     let response = Response::builder()
         .status(status)
+        .header("content-type", "text/plain")
         .body(())
         .unwrap();
 
-    respond.send_response(response, true)
+    let mut send_stream = respond.send_response(response, false)
         .map_err(|e| anyhow::anyhow!("Failed to send error response: {}", e))?;
+
+    // Send error message as body
+    let body = Bytes::from(message.to_string());
+    send_stream.send_data(body, true)
+        .map_err(|e| anyhow::anyhow!("Failed to send error body: {}", e))?;
 
     Ok(())
 }
 
 /// Handle HTTP/2 authentication errors
+/// Phase 4 Audit Fix: Send descriptive error bodies
 async fn handle_h2_auth_error(
     error: AuthError,
     target_host: &str,
@@ -266,10 +274,10 @@ async fn handle_h2_auth_error(
 ) -> Result<()> {
     let duration = start_time.elapsed();
 
-    let (status, _message) = match error {
+    let (status, message) = match error {
         AuthError::MissingHeader => {
             warn!("[H2 CONNECT] Missing Proxy-Authorization for {} (duration={:?})", target_host, duration);
-            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Proxy authentication required")
+            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Proxy authentication required. Please provide a valid Bearer token in the Proxy-Authorization header.")
         },
         AuthError::InvalidFormat => {
             warn!("[H2 CONNECT] Invalid auth format for {} (duration={:?})", target_host, duration);
@@ -277,20 +285,22 @@ async fn handle_h2_auth_error(
         },
         AuthError::TokenExpired => {
             warn!("[H2 CONNECT] Expired token for {} (duration={:?})", target_host, duration);
-            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Token expired")
+            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, "Token expired. Please obtain a new authentication token.")
         },
         AuthError::ValidationFailed(ref msg) => {
             warn!("[H2 CONNECT] Token validation failed for {}: {} (duration={:?})", target_host, msg, duration);
-            (StatusCode::FORBIDDEN, "Token validation failed")
+            (StatusCode::FORBIDDEN, "Token validation failed. The provided token is invalid.")
         },
         AuthError::RegionNotAllowed(ref msg) => {
             warn!("[H2 CONNECT] Region not allowed for {}: {} (duration={:?})", target_host, msg, duration);
-            (StatusCode::FORBIDDEN, "Access denied: Region not in allowed list")
+            (StatusCode::FORBIDDEN, "Access denied: Region not in allowed list for this token.")
         },
     };
 
-    // Build response with Proxy-Authenticate header for 407
-    let mut response = Response::builder().status(status);
+    // Build response with Proxy-Authenticate header for 407 and content-type
+    let mut response = Response::builder()
+        .status(status)
+        .header("content-type", "text/plain");
 
     if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         response = response.header(
@@ -300,13 +310,19 @@ async fn handle_h2_auth_error(
     }
 
     let response = response.body(()).unwrap();
-    respond.send_response(response, true)
-        .map_err(|e| anyhow::anyhow!("Failed to send auth error: {}", e))?;
+    let mut send_stream = respond.send_response(response, false)
+        .map_err(|e| anyhow::anyhow!("Failed to send auth error response: {}", e))?;
+
+    // Send descriptive error body
+    let body = Bytes::from(message.to_string());
+    send_stream.send_data(body, true)
+        .map_err(|e| anyhow::anyhow!("Failed to send auth error body: {}", e))?;
 
     Ok(())
 }
 
 /// Handle HTTP/2 rate limit errors
+/// Phase 4 Audit Fix: Send descriptive error bodies
 async fn handle_h2_rate_limit_error(
     error: RateLimitError,
     target_host: &str,
@@ -316,13 +332,13 @@ async fn handle_h2_rate_limit_error(
 ) -> Result<()> {
     let duration = start_time.elapsed();
 
-    let (status, _message) = match error {
+    let (status, message): (StatusCode, String) = match error {
         RateLimitError::LimitExceeded(_) => {
             warn!(
                 "[H2 CONNECT] Rate limit exceeded for {} - token_id={} (duration={:?})",
                 target_host, token_id, duration
             );
-            (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded. Please retry later.")
+            (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded. Please retry after a short delay.".to_string())
         },
         RateLimitError::TooManyTokens(max) => {
             error!(
@@ -331,20 +347,91 @@ async fn handle_h2_rate_limit_error(
             );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Service temporarily unavailable. Maximum concurrent tokens reached."
+                format!("Service temporarily unavailable. Maximum {} concurrent tokens reached.", max)
             )
         },
     };
 
     let response = Response::builder()
         .status(status)
+        .header("content-type", "text/plain")
         .body(())
         .unwrap();
 
-    respond.send_response(response, true)
-        .map_err(|e| anyhow::anyhow!("Failed to send rate limit error: {}", e))?;
+    let mut send_stream = respond.send_response(response, false)
+        .map_err(|e| anyhow::anyhow!("Failed to send rate limit error response: {}", e))?;
+
+    // Send descriptive error body
+    let body = Bytes::from(message);
+    send_stream.send_data(body, true)
+        .map_err(|e| anyhow::anyhow!("Failed to send rate limit error body: {}", e))?;
 
     Ok(())
+}
+
+/// Send data to client with proper HTTP/2 flow control
+/// Phase 4 Addendum: Implements async capacity polling per addendum specification
+async fn send_with_flow_control(
+    send_stream: &mut h2::SendStream<Bytes>,
+    data: Bytes,
+    len: usize,
+) -> Result<()> {
+    use tokio::time::{sleep, Duration};
+
+    // Reserve capacity (signals intent to send)
+    send_stream.reserve_capacity(len);
+
+    // Poll for available capacity with exponential backoff
+    let mut backoff = Duration::from_millis(10);
+    let max_backoff = Duration::from_millis(500);
+    let mut attempts = 0;
+    let max_attempts = 100; // ~50 seconds max wait
+
+    loop {
+        let available = send_stream.capacity();
+
+        if available >= len {
+            // Sufficient capacity - send immediately
+            send_stream.send_data(data, false)
+                .map_err(|e| anyhow::anyhow!("Failed to send data: {}", e))?;
+            return Ok(());
+        }
+
+        // Check if stream was closed/reset
+        if available == 0 && attempts > 10 {
+            // After some attempts, check if we're making progress
+            // h2 doesn't have is_closed(), so we try send and catch error
+            match send_stream.send_data(Bytes::new(), false) {
+                Ok(_) => {
+                    // Stream still open, continue waiting
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Stream closed or reset: {}", e));
+                }
+            }
+        }
+
+        if attempts >= max_attempts {
+            return Err(anyhow::anyhow!(
+                "Flow control timeout: needed {} bytes, available {} after {} attempts",
+                len, available, attempts
+            ));
+        }
+
+        // Wait for WINDOW_UPDATE with exponential backoff
+        if attempts % 10 == 0 {
+            debug!(
+                "Waiting for capacity: need={}, available={}, attempt={}, backoff={:?}",
+                len, available, attempts, backoff
+            );
+        }
+
+        sleep(backoff).await;
+
+        // Exponential backoff (capped at max)
+        backoff = (backoff * 2).min(max_backoff);
+        attempts += 1;
+    }
 }
 
 /// Bidirectional tunnel for HTTP/2 streams
@@ -413,11 +500,8 @@ async fn tunnel_h2_streams(
                     Ok(n) => {
                         let data = Bytes::copy_from_slice(&upstream_buf[..n]);
 
-                        // Reserve capacity before sending
-                        send_stream.reserve_capacity(n);
-
-                        // Send data to client
-                        if let Err(e) = send_stream.send_data(data, false) {
+                        // Phase 4 Flow Control: Send with proper capacity management
+                        if let Err(e) = send_with_flow_control(&mut send_stream, data, n).await {
                             error!(
                                 "[H2 TUNNEL] SendStream error for {} - user_id={}, token_id={}, error={}",
                                 target_host, user_id, token_id, e
