@@ -50,17 +50,66 @@ fn generate_test_token(secret: &str) -> Result<String> {
 /// Create TLS client config that accepts self-signed certificates
 fn create_tls_config() -> Arc<ClientConfig> {
     use tokio_rustls::rustls;
+    use std::sync::Arc as StdArc;
 
-    let mut root_store = rustls::RootCertStore::empty();
+    // Dangerous: Skip certificate verification for testing with self-signed certs
+    // DO NOT use this in production!
+    #[derive(Debug)]
+    struct DangerousNoVerifier;
 
-    // Add system certificates
-    for cert in rustls_native_certs::load_native_certs().expect("could not load platform certs") {
-        root_store.add(cert).ok();
+    impl rustls::client::danger::ServerCertVerifier for DangerousNoVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            // Accept any certificate
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            // Support all common signature schemes
+            vec![
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                rustls::SignatureScheme::RSA_PKCS1_SHA384,
+                rustls::SignatureScheme::RSA_PKCS1_SHA512,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+                rustls::SignatureScheme::RSA_PSS_SHA512,
+                rustls::SignatureScheme::ED25519,
+                rustls::SignatureScheme::ED448,
+            ]
+        }
     }
 
-    // Create config that allows self-signed certs for testing
+    // Create config with dangerous no-op verifier
     let mut config = ClientConfig::builder()
-        .with_root_certificates(root_store)
+        .dangerous()
+        .with_custom_certificate_verifier(StdArc::new(DangerousNoVerifier))
         .with_no_client_auth();
 
     // Enable ALPN for HTTP/2
@@ -79,19 +128,13 @@ async fn test_h2_missing_auth_returns_407() -> Result<()> {
         .await
         .context("Failed to connect to proxy")?;
 
-    // TLS handshake (skip cert verification for self-signed)
+    // TLS handshake (accepts self-signed certs via custom verifier)
     let connector = TlsConnector::from(create_tls_config());
     let domain = ServerName::try_from("localhost").unwrap().to_owned();
-    let tls_stream = connector.connect(domain, stream).await;
-
-    // For testing with self-signed certs, we'll allow connection failures
-    if tls_stream.is_err() {
-        println!("⚠️  TLS handshake failed (expected with self-signed certs)");
-        println!("   Run server with valid certs or use --proxy-insecure with curl");
-        return Ok(());
-    }
-
-    let tls_stream = tls_stream.unwrap();
+    let tls_stream = connector
+        .connect(domain, stream)
+        .await
+        .context("TLS handshake failed")?;
 
     // HTTP/2 handshake
     let (mut client, h2) = h2::client::handshake(tls_stream)
@@ -148,14 +191,10 @@ async fn test_h2_invalid_jwt_returns_403() -> Result<()> {
 
     let connector = TlsConnector::from(create_tls_config());
     let domain = ServerName::try_from("localhost").unwrap().to_owned();
-    let tls_stream = connector.connect(domain, stream).await;
-
-    if tls_stream.is_err() {
-        println!("⚠️  TLS handshake failed (expected with self-signed certs)");
-        return Ok(());
-    }
-
-    let tls_stream = tls_stream.unwrap();
+    let tls_stream = connector
+        .connect(domain, stream)
+        .await
+        .context("TLS handshake failed")?;
 
     let (mut client, h2) = h2::client::handshake(tls_stream)
         .await
@@ -205,14 +244,10 @@ async fn test_h2_valid_jwt_returns_200() -> Result<()> {
 
     let connector = TlsConnector::from(create_tls_config());
     let domain = ServerName::try_from("localhost").unwrap().to_owned();
-    let tls_stream = connector.connect(domain, stream).await;
-
-    if tls_stream.is_err() {
-        println!("⚠️  TLS handshake failed (expected with self-signed certs)");
-        return Ok(());
-    }
-
-    let tls_stream = tls_stream.unwrap();
+    let tls_stream = connector
+        .connect(domain, stream)
+        .await
+        .context("TLS handshake failed")?;
 
     let (mut client, h2) = h2::client::handshake(tls_stream)
         .await
