@@ -175,7 +175,10 @@ async fn handle_h2_http_request(
         }
     };
 
-    // Phase 5: Extract request body
+    // Phase 5: Extract headers BEFORE consuming request body
+    let request_headers = request.headers().clone();
+
+    // Phase 6: Extract request body
     let mut recv_stream = request.into_body();
     let mut body_bytes = BytesMut::new();
 
@@ -218,9 +221,41 @@ async fn handle_h2_http_request(
     }
 
     // Phase 8: Copy headers (filter hop-by-hop headers)
-    // Note: HTTP/2 headers are already in lowercase
-    // Re-parse headers from the original request before it was consumed
-    // Since we already consumed the request, we need to work with what we have
+    // Hop-by-hop headers that should NOT be forwarded (per RFC 7540 Section 8.1.2.2)
+    let hop_by_hop_headers = [
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "proxy-authorization", // Already validated, don't forward
+        "transfer-encoding",
+        "upgrade",
+        "te", // Except "trailers"
+    ];
+
+    for (name, value) in request_headers.iter() {
+        let name_str = name.as_str();
+
+        // Skip hop-by-hop headers
+        if hop_by_hop_headers.contains(&name_str) {
+            continue;
+        }
+
+        // Skip HTTP/2 pseudo-headers (start with ':')
+        if name_str.starts_with(':') {
+            continue;
+        }
+
+        // Forward all other headers
+        if let Ok(header_value) = value.to_str() {
+            upstream_req = upstream_req.header(name_str, header_value);
+        }
+    }
+
+    // Ensure Host header is set (required by HTTP/1.1)
+    // If not present in original headers, set it from authority
+    if !request_headers.contains_key("host") {
+        upstream_req = upstream_req.header("host", authority);
+    }
 
     // Phase 9: Send request to upstream
     let upstream_response = match upstream_req.send().await {
