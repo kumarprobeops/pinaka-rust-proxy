@@ -818,11 +818,12 @@ fn handle_auth_error(
         .unwrap();
 
     // Add Proxy-Authenticate header for 407 responses (required for proper proxy auth)
-    // Use Bearer scheme to match JWT authentication (RFC 7235)
+    // Use Basic scheme for Chromium/Playwright compatibility (Chromium doesn't support Bearer for proxy auth)
+    // Clients should send: Proxy-Authorization: Basic <base64(jwt:)>
     if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         response.headers_mut().insert(
             "Proxy-Authenticate",
-            "Bearer realm=\"ProbeOps Forward Proxy\"".parse().unwrap(),
+            "Basic realm=\"ProbeOps Forward Proxy\"".parse().unwrap(),
         );
     }
 
