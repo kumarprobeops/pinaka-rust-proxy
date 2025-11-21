@@ -67,6 +67,10 @@ rustls-native-certs = "0.7"
 name = "h2_connect_load"
 path = "tests/h2_connect_load.rs"
 
+[[bin]]
+name = "h1_connect_load"
+path = "tests/h1_connect_load.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
