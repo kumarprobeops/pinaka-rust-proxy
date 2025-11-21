@@ -25,6 +25,7 @@ http-body-util = "0.1"
 
 # JWT authentication
 jsonwebtoken = "9.2"
+base64 = "0.21"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

@@ -102,25 +102,72 @@ impl JwtValidator {
         self.expected_issuer.is_some() && self.expected_audience.is_some()
     }
 
-    /// Extract Bearer token from Authorization header value
-    fn extract_bearer_token(auth_header: &str) -> Result<&str, AuthError> {
-        let parts: Vec<&str> = auth_header.split_whitespace().collect();
+    /// Extract JWT token from Authorization header value
+    /// Supports two formats:
+    /// 1. "Bearer <token>" (standard)
+    /// 2. "Basic <base64(token:)>" (Playwright/Electron compatibility)
+    fn extract_token(auth_header: &str) -> Result<String, AuthError> {
+        let parts: Vec<&str> = auth_header.splitn(2, ' ').collect();
 
         if parts.len() != 2 {
             return Err(AuthError::InvalidFormat);
         }
 
-        if parts[0].to_lowercase() != "bearer" {
+        let auth_type = parts[0].to_lowercase();
+        let credentials = parts[1].trim();
+
+        if credentials.is_empty() {
             return Err(AuthError::InvalidFormat);
         }
 
-        Ok(parts[1])
+        // Handle Bearer token format (standard)
+        if auth_type == "bearer" {
+            return Ok(credentials.to_string());
+        }
+
+        // Handle Basic Auth format (Playwright/Electron compatibility)
+        // Playwright sends: Basic base64("token:") or Basic base64("Bearer token:")
+        if auth_type == "basic" {
+            // Decode base64
+            use base64::{Engine as _, engine::general_purpose};
+            let decoded = general_purpose::STANDARD
+                .decode(credentials)
+                .map_err(|_| AuthError::InvalidFormat)?;
+
+            let decoded_str = String::from_utf8(decoded)
+                .map_err(|_| AuthError::InvalidFormat)?;
+
+            // Split username:password (password is empty in our case)
+            let user_pass: Vec<&str> = decoded_str.splitn(2, ':').collect();
+            if user_pass.is_empty() {
+                return Err(AuthError::InvalidFormat);
+            }
+
+            let username = user_pass[0];
+
+            // Check if username starts with "Bearer " and extract token
+            if let Some(token) = username.strip_prefix("Bearer ") {
+                let token = token.trim();
+                if !token.is_empty() {
+                    return Ok(token.to_string());
+                }
+            }
+
+            // Otherwise, treat the entire username as the token
+            if !username.is_empty() {
+                return Ok(username.to_string());
+            }
+
+            return Err(AuthError::InvalidFormat);
+        }
+
+        Err(AuthError::InvalidFormat)
     }
 
     /// Validate JWT token from Authorization header
     pub fn validate(&self, auth_header: &str) -> Result<JwtClaims, AuthError> {
-        // Extract token from "Bearer <token>" format
-        let token = Self::extract_bearer_token(auth_header)?;
+        // Extract token from "Bearer <token>" or "Basic <base64(token:)>" format
+        let token = Self::extract_token(auth_header)?;
 
         // Configure validation
         let mut validation = Validation::new(self.algorithm);
@@ -138,7 +185,7 @@ impl JwtValidator {
 
         // Decode and validate token
         let decoding_key = DecodingKey::from_secret(self.secret.as_bytes());
-        let token_data = decode::<JwtClaims>(token, &decoding_key, &validation)
+        let token_data = decode::<JwtClaims>(&token, &decoding_key, &validation)
             .map_err(|e| {
                 // Check specific error types
                 use jsonwebtoken::errors::ErrorKind;
@@ -192,21 +239,52 @@ mod tests {
 
     #[test]
     fn test_extract_bearer_token() {
-        // Valid format
-        let result = JwtValidator::extract_bearer_token("Bearer abc123");
+        // Valid Bearer format
+        let result = JwtValidator::extract_token("Bearer abc123");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "abc123");
 
         // Case insensitive
-        let result = JwtValidator::extract_bearer_token("bearer xyz789");
+        let result = JwtValidator::extract_token("bearer xyz789");
         assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "xyz789");
 
-        // Invalid format
-        let result = JwtValidator::extract_bearer_token("abc123");
+        // Invalid format - no auth type
+        let result = JwtValidator::extract_token("abc123");
         assert!(result.is_err());
+    }
 
-        let result = JwtValidator::extract_bearer_token("Basic abc123");
-        assert!(result.is_err());
+    #[test]
+    fn test_extract_basic_auth_token() {
+        use base64::{Engine as _, engine::general_purpose};
+
+        // Test 1: Basic Auth with JWT token as username (Playwright format)
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test";
+        let basic_auth = format!("{}:", token); // "token:"
+        let encoded = general_purpose::STANDARD.encode(basic_auth.as_bytes());
+        let auth_header = format!("Basic {}", encoded);
+
+        let result = JwtValidator::extract_token(&auth_header);
+        assert!(result.is_ok(), "Should extract token from Basic Auth");
+        assert_eq!(result.unwrap(), token);
+
+        // Test 2: Basic Auth with "Bearer <token>" as username
+        let token2 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test2";
+        let basic_auth2 = format!("Bearer {}:", token2); // "Bearer token:"
+        let encoded2 = general_purpose::STANDARD.encode(basic_auth2.as_bytes());
+        let auth_header2 = format!("Basic {}", encoded2);
+
+        let result2 = JwtValidator::extract_token(&auth_header2);
+        assert!(result2.is_ok(), "Should extract token from 'Bearer token:' format");
+        assert_eq!(result2.unwrap(), token2);
+
+        // Test 3: Invalid Basic Auth - empty credentials
+        let result3 = JwtValidator::extract_token("Basic ");
+        assert!(result3.is_err());
+
+        // Test 4: Invalid Basic Auth - invalid base64
+        let result4 = JwtValidator::extract_token("Basic invalid!!!base64");
+        assert!(result4.is_err());
     }
 
     #[test]
