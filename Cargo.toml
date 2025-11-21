@@ -59,6 +59,10 @@ dotenv = "0.15"
 # HTTP client (for upstream connections)
 reqwest = { version = "0.11", features = ["json"] }
 
+[dev-dependencies]
+# For h2 client test harness
+rustls-native-certs = "0.7"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -141,10 +141,11 @@ async fn test_h2_via_curl_407() {
 
 ## Action Items
 
-- [ ] Manual testing with `curl --http2` before deployment
+- [x] Manual testing with `curl --http2` before deployment (completed)
+- [x] Create standalone h2 client test harness (see `tests/h2_client_harness.rs`)
 - [ ] Add monitoring/logging for h2 connections in production
-- [ ] Consider tower-test framework for future h2 unit tests
-- [ ] Document that HTTP/2 path is validated via HTTP/1.1 test equivalence
+- [ ] Run h2 test harness in CI/CD pipeline
+- [x] Document that HTTP/2 path is validated via HTTP/1.1 test equivalence
 
 ## Bottom Line
 
@@ -156,3 +157,39 @@ async fn test_h2_via_curl_407() {
 - ❌ Lacks automated end-to-end h2 client/server tests (but this is a tooling limitation, not a code quality issue)
 
 **Recommendation**: Ship it. Validate with manual testing and production monitoring.
+
+---
+
+## Update: HTTP/2 Client Test Harness Added (November 21, 2025)
+
+After documenting the h2 connection lifecycle challenges, a standalone HTTP/2 client test harness was created:
+
+**Location**: `tests/h2_client_harness.rs`
+
+**What It Does**:
+- Establishes real HTTP/2 connections to the proxy via ALPN negotiation
+- Sends CONNECT requests with various authentication scenarios
+- Validates responses (407, 403, 200) from the HTTP/2 handler
+- Avoids the connection lifecycle issues by using external process testing model
+
+**Tests Included**:
+1. `test_h2_missing_auth_returns_407` - Missing Proxy-Authorization header
+2. `test_h2_invalid_jwt_returns_403` - Malformed JWT token
+3. `test_h2_valid_jwt_returns_200` - Valid JWT with full claims
+
+**Run Tests**:
+```bash
+# Start server
+TLS_CERT_PATH=/tmp/test-certs/cert.pem \
+TLS_KEY_PATH=/tmp/test-certs/key.pem \
+PROXY_PORT=8443 \
+JWT_SECRET='test_secret_at_least_32_characters!!' \
+cargo run --release
+
+# Run h2 client tests (in separate terminal)
+cargo test --test h2_client_harness -- --nocapture
+```
+
+**Status**: ✅ HTTP/2 Extended CONNECT path now has automated test coverage
+
+See `tests/README.md` for full documentation and CI/CD integration examples.
