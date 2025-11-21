@@ -10,6 +10,7 @@ mod server;
 mod reload;
 mod auth;           // Phase 2: JWT authentication
 mod rate_limiter;   // Phase 2: Rate limiting
+mod logger;         // Request logging to backend
 
 use config::Config;
 use reload::ReloadableTlsAcceptor;
@@ -34,6 +35,13 @@ async fn main() -> Result<()> {
     // Start background cleanup task for rate limiter (runs every 60 seconds)
     rate_limiter::RateLimiter::start_cleanup_task(Arc::clone(&config.rate_limiter), 60);
     info!("Rate limiter cleanup task started (interval: 60s)");
+
+    // Start background logging task (flushes every log_batch_interval_secs)
+    Arc::clone(&config.request_logger).start_background_flush();
+    info!(
+        "Request logger started (batch_size={}, interval={}s)",
+        config.log_batch_size, config.log_batch_interval_secs
+    );
 
     // Setup reloadable TLS acceptor with HTTP/2 ALPN
     let tls_acceptor = ReloadableTlsAcceptor::new(

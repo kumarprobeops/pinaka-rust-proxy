@@ -1,6 +1,8 @@
 use anyhow::Result;
 use http::{Method, Request, Response, StatusCode};
-use http_body_util::{Empty, Full};
+use http_body_util::Full;
+#[cfg(test)]
+use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
@@ -204,6 +206,7 @@ async fn handle_h2_connect(
     );
 
     // Phase 4.10: Spawn tunnel task
+    let config_for_tunnel = Arc::clone(&config);
     tokio::spawn(async move {
         match tunnel_h2_streams(
             recv_stream,
@@ -216,6 +219,7 @@ async fn handle_h2_connect(
         ).await {
             Ok((bytes_sent, bytes_received)) => {
                 let duration = start_time.elapsed();
+                let total_bytes = bytes_sent + bytes_received;
                 info!(
                     "[H2 CONNECT] Completed {} - user_id={}, token_id={}, duration={:?}, \
                      client→upstream={} bytes, upstream→client={} bytes, total={} bytes",
@@ -225,8 +229,22 @@ async fn handle_h2_connect(
                     duration,
                     bytes_sent,
                     bytes_received,
-                    bytes_sent + bytes_received
+                    total_bytes
                 );
+
+                // Log request to backend (best-effort, non-blocking)
+                config_for_tunnel.request_logger.log_request(
+                    claims.token_id.clone(),
+                    claims.user_id,
+                    "CONNECT".to_string(),
+                    target_host.clone(),
+                    Some(200),  // HTTP/2 CONNECT returns 200 on success
+                    total_bytes as i64,
+                    Some(duration.as_millis() as i64),
+                    true,   // success = true
+                    false,  // rate_limited = false (made it through tunnel)
+                    None,   // no error
+                ).await;
             }
             Err(e) => {
                 error!(
@@ -674,10 +692,11 @@ where
 
     // Phase 3.5: Spawn tunnel task and upgrade connection
     let target_host_for_log = target_host.clone();
+    let config_for_tunnel = Arc::clone(&config);
     tokio::spawn(async move {
         match hyper::upgrade::on(&mut req).await {
             Ok(upgraded) => {
-                if let Err(e) = tunnel(upgraded, upstream, target_host.clone(), claims.user_id as i64, claims.token_id, start_time).await {
+                if let Err(e) = tunnel(upgraded, upstream, target_host.clone(), claims.user_id as i64, claims.token_id, start_time, config_for_tunnel).await {
                     error!("[CONNECT] Tunnel error for {}: {}", target_host, e);
                 }
             }
@@ -703,6 +722,7 @@ async fn tunnel(
     user_id: i64,
     token_id: String,
     start_time: std::time::Instant,
+    config: Arc<Config>,
 ) -> Result<()> {
     let client = TokioIo::new(upgraded);
     let (mut client_read, mut client_write) = tokio::io::split(client);
@@ -723,6 +743,20 @@ async fn tunnel(
         target_host, user_id, token_id, duration,
         c_to_u, u_to_c, total_bytes
     );
+
+    // Log request to backend (best-effort, non-blocking)
+    config.request_logger.log_request(
+        token_id.clone(),
+        user_id as i32,
+        "CONNECT".to_string(),
+        target_host.clone(),
+        Some(200),  // HTTP/1.1 CONNECT returns 200 on success
+        total_bytes as i64,
+        Some(duration.as_millis() as i64),
+        true,   // success = true
+        false,  // rate_limited = false (made it through tunnel)
+        None,   // no error
+    ).await;
 
     Ok(())
 }
@@ -841,6 +875,8 @@ mod tests {
 
     // Helper to create a test config
     fn create_test_config() -> Arc<Config> {
+        use crate::logger::RequestLogger;
+
         let jwt_validator = Arc::new(JwtValidator::new(
             "test_secret_key_32_chars_minimum!!".to_string(),
             "HS256".to_string(),
@@ -856,6 +892,14 @@ mod tests {
             max_buckets: 100,
         };
         let rate_limiter = Arc::new(RateLimiter::new(rate_limiter_config));
+
+        let request_logger = Arc::new(RequestLogger::new(
+            "http://localhost:8000".to_string(),
+            "test-node".to_string(),
+            "us-east".to_string(),
+            100,
+            5,
+        ));
 
         Arc::new(Config {
             host: "127.0.0.1".to_string(),
@@ -875,6 +919,7 @@ mod tests {
             log_batch_interval_secs: 5,
             jwt_validator,
             rate_limiter,
+            request_logger,
         })
     }
 

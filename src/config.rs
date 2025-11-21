@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::auth::{JwtValidator, SharedJwtValidator};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, SharedRateLimiter};
+use crate::logger::{RequestLogger, SharedRequestLogger};
 
 #[derive(Debug)]
 pub struct Config {
@@ -37,6 +38,7 @@ pub struct Config {
     // Phase 2: Authentication and rate limiting components
     pub jwt_validator: SharedJwtValidator,
     pub rate_limiter: SharedRateLimiter,
+    pub request_logger: SharedRequestLogger,
 }
 
 impl Config {
@@ -145,6 +147,15 @@ impl Config {
         };
         let rate_limiter = RateLimiter::new(rate_limiter_config);
 
+        // Initialize request logger
+        let request_logger = RequestLogger::new(
+            backend_url.clone(),
+            probe_node_name.clone(),
+            probe_node_region.clone(),
+            log_batch_size,
+            log_batch_interval_secs,
+        );
+
         Ok(Config {
             host,
             port,
@@ -163,6 +174,7 @@ impl Config {
             log_batch_interval_secs,
             jwt_validator: Arc::new(jwt_validator),
             rate_limiter: Arc::new(rate_limiter),
+            request_logger: Arc::new(request_logger),
         })
     }
 }
@@ -180,6 +192,8 @@ mod tests {
     fn setup_test_env() {
         env::set_var("JWT_SECRET", "valid_test_secret_32_chars_min!!");
         env::set_var("PROBE_NODE_REGION", "test-region");
+        env::set_var("BACKEND_URL", "http://localhost:8000");
+        env::set_var("PROBE_NODE_NAME", "test-node");
     }
 
     // Helper to clear test environment
