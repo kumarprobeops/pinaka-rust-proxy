@@ -81,9 +81,12 @@ pub async fn serve_h2(
 
                     let result = if method == Method::CONNECT {
                         handle_h2_connect(request, respond, config).await
+                    } else if config.http_proxy_enabled {
+                        // Forward HTTP requests (GET, POST, etc.) if HTTP proxy is enabled
+                        handle_h2_http_request(request, respond, config).await
                     } else {
-                        // For non-CONNECT methods, return 204 No Content (stub response)
-                        info!("[H2] Non-CONNECT {} request for {} - returning 204 (stub)", method, uri);
+                        // For non-CONNECT methods when HTTP proxy is disabled, return 204 No Content (stub response)
+                        info!("[H2] Non-CONNECT {} request for {} - HTTP forwarding disabled, returning 204", method, uri);
                         let response = Response::builder()
                             .status(StatusCode::NO_CONTENT)
                             .body(())
