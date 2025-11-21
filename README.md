@@ -1,14 +1,16 @@
 # Pinaka Rust Proxy - Production-Ready HTTP/2 Forward Proxy
 
-High-performance dual-protocol forward proxy built with Rust, featuring native HTTP/2 Extended CONNECT (RFC 8441) with HTTP/1.1 fallback, JWT authentication, and token-based rate limiting.
+High-performance dual-protocol forward proxy built with Rust, featuring native HTTP/2 Extended CONNECT (RFC 8441) with HTTP/1.1 fallback, **full HTTP forwarding (GET/POST/etc.)**, JWT authentication, and token-based rate limiting.
 
-**Status**: ✅ **Production Ready** - Phases 1-8 Complete | 97.9% RFC Compliance | Zero Performance Overhead
+**Status**: ✅ **Production Ready** - All Features Complete | 97.9% RFC Compliance | Deployed & Serving Traffic
+
+**Current Deployment**: Serving live browser traffic on ProbeOps probe nodes (us-east, eu-west)
 
 ---
 
 ## 🎯 What We Built
 
-A **production-grade HTTPS forward proxy** with the following capabilities:
+A **production-grade HTTP/HTTPS forward proxy** with comprehensive protocol support:
 
 ### Core Features
 
@@ -16,6 +18,15 @@ A **production-grade HTTPS forward proxy** with the following capabilities:
 - HTTP/2 Extended CONNECT (RFC 8441) with stream multiplexing
 - HTTP/1.1 CONNECT fallback for compatibility
 - Automatic protocol negotiation via ALPN (Application-Layer Protocol Negotiation)
+
+✅ **HTTP Forwarding (NEW - November 2025)**
+- **GET, POST, PUT, PATCH, DELETE** - All HTTP methods supported
+- Works on both HTTP/1.1 and HTTP/2 protocols
+- Full header preservation (User-Agent, Accept, Custom headers)
+- HTTP→HTTPS redirect pass-through (301/302 forwarded to browser)
+- Chunked transfer encoding support
+- Large response streaming (tested with 10MB+ responses)
+- **Use Case**: Browse HTTP sites like neverssl.com, redirect handling for yahoo.com/ndtv.com
 
 ✅ **Security & Authentication**
 - JWT-based authentication with HS256/HS384/HS512 algorithms
@@ -36,9 +47,17 @@ A **production-grade HTTPS forward proxy** with the following capabilities:
 - 0% idle CPU usage (async I/O design)
 - HTTP/2 within 0.37% of HTTP/1.1 performance (zero overhead)
 
+✅ **Logging & Analytics (NEW - November 2025)**
+- Batch log submission to backend API (every 5 seconds)
+- Comprehensive request tracking (token_id, user_id, target_url, method, status, size, duration)
+- Support for both manual tokens and ephemeral session tokens
+- PostgreSQL integration via `forward_proxy_request_logs` table
+- Real-time analytics for bandwidth, performance, and usage patterns
+
 ✅ **Operational Excellence**
 - Structured JSON logging via tracing
 - Graceful shutdown with SIGINT/SIGTERM
+- Certificate hot-reload via SIGHUP (zero-downtime cert updates)
 - Prometheus-ready metrics instrumentation
 - Comprehensive test coverage (unit + integration + load)
 
@@ -565,11 +584,14 @@ TLS_KEY_PATH=/etc/letsencrypt/live/staging.probeops.com/privkey.pem
 JWT_SECRET=your_secret_key_at_least_32_characters
 JWT_ALGORITHM=HS256
 
+# HTTP Proxy Forwarding (NEW)
+HTTP_PROXY_ENABLED=true  # Enable GET/POST/etc forwarding (not just CONNECT)
+
 # Rate Limiting (10k req/min per token, 500 burst)
 RATE_LIMIT_REQUESTS_PER_MINUTE=10000
 RATE_LIMIT_BURST_SIZE=500
 
-# Optional: Backend API integration
+# Backend API Integration (for request logging)
 BACKEND_URL=https://staging.probeops.com
 PROBE_NODE_NAME=probe-node-rust
 PROBE_NODE_REGION=us-east
@@ -604,6 +626,23 @@ JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 nghttp -v --no-verify \
   -H "proxy-authorization: Bearer $JWT" \
   "https://localhost:443/www.google.com:443"
+```
+
+**Test HTTP Forwarding** (GET/POST):
+```bash
+# Test HTTP GET request
+printf "GET http://neverssl.com/ HTTP/1.1\r\nHost: neverssl.com\r\nProxy-Authorization: Bearer $JWT\r\nConnection: close\r\n\r\n" | \
+  openssl s_client -connect localhost:443 -quiet 2>&1 | head -30
+
+# Test HTTP POST request
+BODY='{"test":"data"}'
+printf "POST http://httpbin.org/post HTTP/1.1\r\nHost: httpbin.org\r\nProxy-Authorization: Bearer $JWT\r\nContent-Type: application/json\r\nContent-Length: ${#BODY}\r\nConnection: close\r\n\r\n$BODY" | \
+  openssl s_client -connect localhost:443 -quiet 2>&1 | head -40
+
+# Test redirect handling (HTTP→HTTPS)
+printf "GET http://yahoo.com/ HTTP/1.1\r\nHost: yahoo.com\r\nProxy-Authorization: Bearer $JWT\r\nConnection: close\r\n\r\n" | \
+  openssl s_client -connect localhost:443 -quiet 2>&1 | head -20
+# Should return: HTTP/1.1 301 Moved Permanently
 ```
 
 **Run Load Tests**:
