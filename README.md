@@ -1,10 +1,12 @@
 # Pinaka Rust Proxy - Production-Ready HTTP/2 Forward Proxy
 
-High-performance dual-protocol forward proxy built with Rust, featuring native HTTP/2 Extended CONNECT (RFC 8441) with HTTP/1.1 fallback, **full HTTP forwarding (GET/POST/etc.)**, JWT authentication, and token-based rate limiting.
+High-performance dual-protocol forward proxy built with Rust, featuring native HTTP/2 Extended CONNECT (RFC 8441) with HTTP/1.1 fallback, **full HTTP forwarding (GET/POST/etc.)**, JWT authentication, token-based rate limiting, and **mixed content policy enforcement**.
 
-**Status**: ✅ **Production Ready** - All Features Complete | 97.9% RFC Compliance | Deployed & Serving Traffic
+**Version**: 0.2.0 | **Status**: ✅ **Production Ready** - All Features Complete | 97.9% RFC Compliance
 
 **Current Deployment**: Serving live browser traffic on ProbeOps probe nodes (us-east, eu-west)
+
+**Latest Release (v0.2.0)**: Added HTTP→HTTPS upgrade policy for mixed content - [See CHANGELOG](CHANGELOG.md)
 
 ---
 
@@ -46,6 +48,15 @@ A **production-grade HTTP/HTTPS forward proxy** with comprehensive protocol supp
 - 1.72 MB memory footprint (extremely efficient)
 - 0% idle CPU usage (async I/O design)
 - HTTP/2 within 0.37% of HTTP/1.1 performance (zero overhead)
+
+✅ **Mixed Content Policy (NEW - v0.2.0, November 2025)**
+- HTTP→HTTPS upgrade policy for enhanced security
+- Configurable modes: `allow`, `upgrade`, or `block` mixed content
+- Smart HTTPS probing before upgrade (avoids 404 errors)
+- Configurable failure handling: `block`, `fallback`, or `warn`
+- Comprehensive Prometheus metrics (6 new metrics)
+- **Use Case**: Reduce browser "Not secure" warnings on sites like yahoo.com, ndtv.com
+- **Coverage**: 10-20% of mixed content (direct HTTP proxy requests)
 
 ✅ **Logging & Analytics (NEW - November 2025)**
 - Batch log submission to backend API (every 5 seconds)
@@ -595,6 +606,24 @@ RATE_LIMIT_BURST_SIZE=500
 BACKEND_URL=https://staging.probeops.com
 PROBE_NODE_NAME=probe-node-rust
 PROBE_NODE_REGION=us-east
+
+# Mixed Content Policy (NEW in v0.2.0)
+MIXED_CONTENT_POLICY=upgrade          # Options: allow, upgrade, block (default: allow)
+UPGRADE_FAILURE_ACTION=warn           # Options: block, fallback, warn (default: warn)
+UPGRADE_PROBE_TIMEOUT=1000            # Milliseconds (default: 1000)
+```
+
+**Mixed Content Policy Options:**
+- `MIXED_CONTENT_POLICY=allow` - Pass through all HTTP requests (default, no warnings suppression)
+- `MIXED_CONTENT_POLICY=upgrade` - Try to upgrade HTTP→HTTPS, with configurable failure handling
+- `MIXED_CONTENT_POLICY=block` - Block all HTTP requests with HTTPS Referer (strict mode)
+
+**Upgrade Failure Actions** (only used when `policy=upgrade`):
+- `UPGRADE_FAILURE_ACTION=warn` - Log warning and allow HTTP request (recommended, lenient)
+- `UPGRADE_FAILURE_ACTION=fallback` - Silently allow HTTP request on upgrade failure
+- `UPGRADE_FAILURE_ACTION=block` - Return 502 Bad Gateway on upgrade failure (may break sites)
+
+**Use Case:** Reduce browser "Not secure" warnings on sites with mixed content (HTTP resources on HTTPS pages)
 ```
 
 ### Run
