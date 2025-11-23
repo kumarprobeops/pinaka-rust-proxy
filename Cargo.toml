@@ -73,6 +73,9 @@ rand = "0.8"
 trust-dns-resolver = "0.23"
 ipnetwork = "0.20"
 
+# URL parsing for mixed content policy
+url = "2.5"
+
 [dev-dependencies]
 # For h2 client test harness
 rustls-native-certs = "0.7"

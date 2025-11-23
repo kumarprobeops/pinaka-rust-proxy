@@ -1116,6 +1116,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trust-dns-resolver",
+ "url",
  "webpki-roots 0.26.11",
 ]
 

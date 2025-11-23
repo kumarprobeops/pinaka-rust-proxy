@@ -918,13 +918,7 @@ async fn forward_http_request(
             .unwrap());
     }
 
-    let scheme = uri.scheme_str().unwrap_or("http");
-    let authority = uri.authority().unwrap();
-    let host = authority.host();
-    let port = authority.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
-    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
-    debug!("[HTTP] {} {} ({}:{})", method, target_url, host, port);
+    debug!("[HTTP] {} {}", method, target_url);
 
     // 3. JWT Authentication
     let claims = match config.jwt_validator.validate_request(&req) {
@@ -973,11 +967,35 @@ async fn forward_http_request(
             .unwrap());
     }
 
-    // 7. Extract headers before consuming the body (collect() takes ownership)
+    // 7. Mixed content policy check
+    // Extract headers first for mixed content detection
     let request_headers = req.headers().clone();
 
+    // Check and handle mixed content (HTTP request with HTTPS Referer/Origin)
+    // This may upgrade HTTP→HTTPS or block the request based on policy
+    let (mut parts, body) = req.into_parts();
+    match crate::mixed_content::handle_mixed_content_request(
+        &mut parts.uri,
+        &request_headers,
+        &config,
+    )
+    .await
+    {
+        Ok(Some(response)) => {
+            // Request was blocked or modified - return early
+            return Ok(response);
+        }
+        Ok(None) => {
+            // Continue with potentially upgraded URI
+        }
+        Err(e) => {
+            error!("[HTTP] Mixed content policy error: {}", e);
+            // Continue on error (fail open)
+        }
+    }
+
     // 8. Stream body with size limit enforcement (Phase 4: no full buffering)
-    let (parts, body) = req.into_parts();
+    // Note: parts and body already extracted above for mixed content check
     let body_bytes = match crate::body_limiter::read_body_with_limit(
         body,
         config.max_request_body_size,
@@ -994,6 +1012,14 @@ async fn forward_http_request(
                 .unwrap());
         }
     };
+
+    // Reconstruct URI info from potentially modified parts.uri
+    let uri = &parts.uri;
+    let scheme = uri.scheme_str().unwrap_or("http");
+    let authority = uri.authority().unwrap();
+    let host = authority.host();
+    let port = authority.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     // 9. SSRF protection - resolve and check destination
     let vetted_ips = match config.destination_filter.check_and_resolve(host).await {

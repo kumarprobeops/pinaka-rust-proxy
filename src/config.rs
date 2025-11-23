@@ -63,6 +63,11 @@ pub struct Config {
     // SSRF protection and IP tracking components
     pub destination_filter: Arc<DestinationFilter>,
     pub ip_tracker: Arc<IpTracker>,
+
+    // Mixed content policy configuration
+    pub mixed_content_policy: String,
+    pub upgrade_failure_action: String,
+    pub upgrade_probe_timeout_ms: u64,
 }
 
 impl Config {
@@ -248,6 +253,44 @@ impl Config {
             ip_tracker_ttl_seconds,
         );
 
+        // Mixed content policy configuration
+        let mixed_content_policy = env::var("MIXED_CONTENT_POLICY")
+            .unwrap_or_else(|_| "allow".to_string());
+
+        // Validate mixed_content_policy value
+        if !["allow", "upgrade", "block"].contains(&mixed_content_policy.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Invalid MIXED_CONTENT_POLICY '{}'. Must be 'allow', 'upgrade', or 'block'",
+                mixed_content_policy
+            ));
+        }
+
+        let upgrade_failure_action = env::var("UPGRADE_FAILURE_ACTION")
+            .unwrap_or_else(|_| "warn".to_string());
+
+        // Validate upgrade_failure_action value
+        if !["block", "fallback", "warn"].contains(&upgrade_failure_action.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Invalid UPGRADE_FAILURE_ACTION '{}'. Must be 'block', 'fallback', or 'warn'",
+                upgrade_failure_action
+            ));
+        }
+
+        let upgrade_probe_timeout_ms = env::var("UPGRADE_PROBE_TIMEOUT")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse()
+            .context("Invalid UPGRADE_PROBE_TIMEOUT")?;
+
+        // Log mixed content policy configuration
+        if mixed_content_policy != "allow" {
+            tracing::info!(
+                policy = %mixed_content_policy,
+                failure_action = %upgrade_failure_action,
+                probe_timeout_ms = upgrade_probe_timeout_ms,
+                "✓ Mixed content policy enabled"
+            );
+        }
+
         Ok(Config {
             host,
             port,
@@ -281,6 +324,9 @@ impl Config {
             ip_tracker_ttl_seconds,
             destination_filter: Arc::new(destination_filter),
             ip_tracker: Arc::new(ip_tracker),
+            mixed_content_policy,
+            upgrade_failure_action,
+            upgrade_probe_timeout_ms,
         })
     }
 }

@@ -16,6 +16,7 @@ mod ip_tracker;          // IP-per-token limits
 mod http_client;         // Minimal HTTP client (TcpStream + httparse)
 mod body_limiter;        // Streaming body size enforcement
 mod http_metrics;        // Prometheus metrics for HTTP forwarding
+mod mixed_content;       // Mixed content policy enforcement
 
 use config::Config;
 use reload::ReloadableTlsAcceptor;

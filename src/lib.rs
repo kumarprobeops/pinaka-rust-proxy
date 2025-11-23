@@ -10,6 +10,7 @@ pub mod body_limiter;
 pub mod http_metrics;
 pub mod http_client;
 pub mod logger;
+pub mod mixed_content;
 
 // Re-export commonly used types for testing
 pub use destination_filter::{DestinationFilter, DestinationError};

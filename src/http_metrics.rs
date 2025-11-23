@@ -131,6 +131,44 @@ lazy_static::lazy_static! {
         "Total number of Content-Length mismatches (premature EOF)",
         &["expected_vs_actual"]
     ).unwrap();
+
+    // Mixed content policy metrics
+    pub static ref MIXED_CONTENT_DETECTED: IntCounterVec = register_int_counter_vec!(
+        "http_proxy_mixed_content_detected_total",
+        "Total HTTP requests with HTTPS Referer/Origin",
+        &["policy_action"]
+    ).unwrap();
+
+    pub static ref MIXED_CONTENT_ALLOWED: IntCounterVec = register_int_counter_vec!(
+        "http_proxy_mixed_content_allowed_total",
+        "Mixed content requests allowed through",
+        &["reason"]
+    ).unwrap();
+
+    pub static ref MIXED_CONTENT_BLOCKED: IntCounterVec = register_int_counter_vec!(
+        "http_proxy_mixed_content_blocked_total",
+        "Mixed content requests blocked (403)",
+        &["reason"]
+    ).unwrap();
+
+    pub static ref MIXED_CONTENT_UPGRADED: IntCounterVec = register_int_counter_vec!(
+        "http_proxy_mixed_content_upgraded_total",
+        "Successful HTTP→HTTPS upgrades",
+        &["result"]
+    ).unwrap();
+
+    pub static ref MIXED_CONTENT_UPGRADE_FAILED: IntCounterVec = register_int_counter_vec!(
+        "http_proxy_mixed_content_upgrade_failed_total",
+        "Failed HTTP→HTTPS upgrade attempts",
+        &["failure_reason"]
+    ).unwrap();
+
+    pub static ref UPGRADE_PROBE_DURATION: HistogramVec = register_histogram_vec!(
+        "http_proxy_upgrade_probe_duration_seconds",
+        "HTTPS probe duration in seconds",
+        &["result"],
+        vec![0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
+    ).unwrap();
 }
 
 /// Helper struct for recording HTTP metrics
@@ -250,6 +288,48 @@ impl HttpMetrics {
         CONTENT_LENGTH_MISMATCHES
             .with_label_values(&[&format!("expected_{}_got_{}", expected, actual)])
             .inc();
+    }
+
+    /// Record mixed content detection
+    pub fn record_mixed_content_detected(policy_action: &str) {
+        MIXED_CONTENT_DETECTED
+            .with_label_values(&[policy_action])
+            .inc();
+    }
+
+    /// Record mixed content allowed
+    pub fn record_mixed_content_allowed(reason: &str) {
+        MIXED_CONTENT_ALLOWED
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Record mixed content blocked
+    pub fn record_mixed_content_blocked(reason: &str) {
+        MIXED_CONTENT_BLOCKED
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Record successful HTTP→HTTPS upgrade
+    pub fn record_mixed_content_upgraded(result: &str) {
+        MIXED_CONTENT_UPGRADED
+            .with_label_values(&[result])
+            .inc();
+    }
+
+    /// Record failed HTTP→HTTPS upgrade
+    pub fn record_mixed_content_upgrade_failed(failure_reason: &str) {
+        MIXED_CONTENT_UPGRADE_FAILED
+            .with_label_values(&[failure_reason])
+            .inc();
+    }
+
+    /// Record HTTPS probe duration
+    pub fn record_upgrade_probe_duration(duration_secs: f64, success: bool) {
+        UPGRADE_PROBE_DURATION
+            .with_label_values(&[if success { "success" } else { "failure" }])
+            .observe(duration_secs);
     }
 }
 
