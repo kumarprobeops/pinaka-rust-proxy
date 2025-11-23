@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  rust-proxy:
+    image: kumarprobeops/pinaka-rust-proxy:latest
+    container_name: pinaka-rust-proxy
+    restart: unless-stopped
+
+    # Port mapping
+    ports:
+      - "443:443"  # HTTPS proxy port
+      # - "8443:8443"  # Alternative port (uncomment if needed)
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Volume mounts for TLS certificates
+    volumes:
+      # Let's Encrypt certificates (adjust path as needed)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+
+      # Alternative: Mount custom certificate directory
+      # - ./certs:/app/certs:ro
+
+    # Network mode
+    network_mode: bridge
+
+    # Resource limits (optional but recommended)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "443"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Optional: If you need custom networks
+# networks:
+#   proxy-network:
+#     driver: bridge

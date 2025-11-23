@@ -544,7 +544,31 @@ JWT_ALGORITHM=RS256
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Option 1: Docker Compose (Recommended)
+
+**Fastest way to get started:**
+
+```bash
+# 1. Clone repository
+git clone https://github.com/kumarprobeops/pinaka-rust-proxy.git
+cd pinaka-rust-proxy
+
+# 2. Copy and configure environment
+cp .env.template .env
+nano .env  # Edit TLS_CERT_PATH, TLS_KEY_PATH, and JWT_SECRET
+
+# 3. Start the proxy
+docker compose up -d
+
+# 4. View logs
+docker compose logs -f rust-proxy
+```
+
+**See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment guide.**
+
+### Option 2: Build from Source
+
+#### Prerequisites
 
 **Linux/Ubuntu (Staging/Production)**:
 ```bash
