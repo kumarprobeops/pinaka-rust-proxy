@@ -50,6 +50,15 @@ pub struct JwtClaims {
     /// Audience (e.g., "forward-proxy")
     #[serde(default)]
     pub aud: Option<String>,
+
+    /// Rate limit: Maximum requests per hour (tier-based)
+    /// Falls back to default if not present
+    #[serde(default)]
+    pub rate_limit_per_hour: Option<usize>,
+
+    /// Concurrent tabs limit (tier-based)
+    #[serde(default)]
+    pub concurrent_tabs: Option<usize>,
 }
 
 /// JWT Validator with configuration

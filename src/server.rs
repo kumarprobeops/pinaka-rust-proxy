@@ -167,8 +167,8 @@ async fn handle_h2_http_request(
 
     debug!("[H2 HTTP] Authenticated {} - user_id={}, token_id={}", target_url, claims.user_id, claims.token_id);
 
-    // Phase 4: Rate limiting
-    match config.rate_limiter.check_limit(&claims.token_id).await {
+    // Phase 4: Rate limiting (with per-tier limits from JWT)
+    match config.rate_limiter.check_limit_with_override(&claims.token_id, claims.rate_limit_per_hour).await {
         Ok(()) => {},
         Err(e) => {
             return handle_h2_rate_limit_error(e, &target_url, &claims.token_id, start_time, &mut respond).await;
@@ -415,8 +415,8 @@ async fn handle_h2_connect(
         target_host, claims.user_id, claims.token_id, claims.allowed_regions
     );
 
-    // Phase 4.6: Rate Limiting
-    match config.rate_limiter.check_limit(&claims.token_id).await {
+    // Phase 4.6: Rate Limiting (with per-tier limits from JWT)
+    match config.rate_limiter.check_limit_with_override(&claims.token_id, claims.rate_limit_per_hour).await {
         Ok(()) => {},
         Err(e) => {
             return handle_h2_rate_limit_error(e, &target_host, &claims.token_id, start_time, &mut respond).await;

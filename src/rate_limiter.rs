@@ -121,9 +121,31 @@ impl RateLimiter {
         }
     }
 
-    /// Check if request is allowed for given token
-    pub async fn check_limit(&self, token_id: &str) -> Result<(), RateLimitError> {
+    /// Check if request is allowed for given token with optional dynamic limits from JWT
+    ///
+    /// If `rate_limit_per_hour` is provided (from JWT claims), it overrides the default config.
+    /// This allows per-tier rate limiting: Free=500/hour, Standard=2000/hour, etc.
+    pub async fn check_limit_with_override(
+        &self,
+        token_id: &str,
+        rate_limit_per_hour: Option<usize>
+    ) -> Result<(), RateLimitError> {
         let mut buckets = self.buckets.lock().await;
+
+        // Calculate dynamic limits from JWT or fall back to config defaults
+        let (requests_per_minute, burst_size) = if let Some(hourly_limit) = rate_limit_per_hour {
+            // Convert hourly limit to per-minute + calculate reasonable burst
+            let rpm = (hourly_limit as f64 / 60.0).ceil() as usize;
+            let burst = (rpm * 5).min(500).max(10); // 5-minute burst, capped at 500, min 10
+            debug!("Using JWT rate limit for {}: {}/hour = {}/min (burst: {})",
+                   token_id, hourly_limit, rpm, burst);
+            (rpm, burst)
+        } else {
+            // Fall back to config defaults
+            debug!("Using default rate limit for {}: {}/min (burst: {})",
+                   token_id, self.config.requests_per_minute, self.config.burst_size);
+            (self.config.requests_per_minute, self.config.burst_size)
+        };
 
         // Get or create bucket for this token
         let bucket = buckets.get_mut(token_id);
@@ -134,10 +156,10 @@ impl RateLimiter {
                 if bucket.is_expired() {
                     debug!("Token bucket expired for {}, creating new one", token_id);
 
-                    // Create new bucket
+                    // Create new bucket with dynamic limits
                     let new_bucket = TokenBucket::new(
-                        self.config.burst_size,
-                        self.config.requests_per_minute,
+                        burst_size,                    // Use dynamic burst
+                        requests_per_minute,           // Use dynamic rate
                         Duration::from_secs(self.config.bucket_ttl_seconds),
                     );
 
@@ -167,7 +189,7 @@ impl RateLimiter {
                     } else {
                         warn!(
                             "Rate limit exceeded for {} (capacity: {}, refill: {}/min)",
-                            token_id, self.config.burst_size, self.config.requests_per_minute
+                            token_id, burst_size, requests_per_minute  // Use dynamic values
                         );
                         Err(RateLimitError::LimitExceeded(token_id.to_string()))
                     }
@@ -206,10 +228,10 @@ impl RateLimiter {
                     }
                 }
 
-                // Create new bucket
+                // Create new bucket with dynamic limits
                 let mut bucket = TokenBucket::new(
-                    self.config.burst_size,
-                    self.config.requests_per_minute,
+                    burst_size,                    // Use dynamic burst
+                    requests_per_minute,           // Use dynamic rate
                     Duration::from_secs(self.config.bucket_ttl_seconds),
                 );
 
@@ -223,6 +245,14 @@ impl RateLimiter {
                 }
             }
         }
+    }
+
+    /// Backward-compatible wrapper that uses default config limits
+    ///
+    /// This method maintains the original API for code that doesn't support dynamic limits.
+    /// It simply calls `check_limit_with_override` with `None` for rate_limit_per_hour.
+    pub async fn check_limit(&self, token_id: &str) -> Result<(), RateLimitError> {
+        self.check_limit_with_override(token_id, None).await
     }
 
     /// Get current stats for monitoring
