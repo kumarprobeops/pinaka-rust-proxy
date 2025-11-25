@@ -619,7 +619,10 @@ async fn handle_h2_rate_limit_error(
                 "[H2 CONNECT] Rate limit exceeded for {} - token_id={} (duration={:?})",
                 target_host, token_id, duration
             );
-            (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded. Please retry after a short delay.".to_string())
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Request quota exhausted for this token.\n\nOptions:\n1. Refresh your token (create new token in Multi-Geo Browser)\n2. Upgrade to a higher tier for increased limits\n\nVisit https://staging.probeops.com/subscription to upgrade.".to_string()
+            )
         },
         RateLimitError::TooManyTokens(max) => {
             error!(

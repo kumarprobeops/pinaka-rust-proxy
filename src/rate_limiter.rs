@@ -134,11 +134,12 @@ impl RateLimiter {
 
         // Calculate dynamic limits from JWT or fall back to config defaults
         let (requests_per_minute, burst_size) = if let Some(hourly_limit) = rate_limit_per_hour {
-            // Convert hourly limit to per-minute + calculate reasonable burst
-            let rpm = (hourly_limit as f64 / 60.0).ceil() as usize;
-            let burst = (rpm * 5).min(500).max(10); // 5-minute burst, capped at 500, min 10
-            debug!("Using JWT rate limit for {}: {}/hour = {}/min (burst: {})",
-                   token_id, hourly_limit, rpm, burst);
+            // Use full hourly limit as burst capacity (allows fast page loads)
+            // Minimal refill rate to effectively enforce hourly quota
+            let burst = hourly_limit;  // Full hourly quota as burst (e.g., 500 for Free tier)
+            let rpm = 1;  // Minimal refill (1 req/min = negligible, forces token refresh)
+            debug!("Using JWT rate limit for {}: {}/hour total quota (burst: {}, minimal refill)",
+                   token_id, hourly_limit, burst);
             (rpm, burst)
         } else {
             // Fall back to config defaults
