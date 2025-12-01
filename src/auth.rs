@@ -338,6 +338,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string(), "eu-west".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("forward-proxy".to_string()),
         };
@@ -375,6 +377,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp(),
             iat: (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("forward-proxy".to_string()),
         };
@@ -415,6 +419,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("forward-proxy".to_string()),
         };
@@ -456,6 +462,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string(), "eu-west".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("forward-proxy".to_string()),
         };
@@ -498,6 +506,8 @@ mod tests {
             allowed_regions: vec!["*".to_string()], // Wildcard grants all regions
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("forward-proxy".to_string()),
         };
@@ -535,6 +545,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("malicious_issuer".to_string()),
             aud: Some("forward-proxy".to_string()),
         };
@@ -575,6 +587,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("wrong_service".to_string()),
         };
@@ -620,6 +634,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: None, // No issuer
             aud: None, // No audience
         };
@@ -679,6 +695,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: chrono::Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: Some("probeops".to_string()),
             aud: Some("forward-proxy".to_string()),
         };

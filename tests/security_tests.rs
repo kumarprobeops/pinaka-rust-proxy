@@ -1,9 +1,10 @@
 // Security Tests for HTTP Proxy
 // Phase 4: Comprehensive security testing for SSRF, blocklists, and rate limiting
+// Note: These tests use derusted library directly since destination_filter was moved there
 
 #[cfg(test)]
 mod destination_filter_tests {
-    use pinaka_rust_proxy::destination_filter::{DestinationFilter, DestinationError};
+    use derusted::{DestinationFilter, DestinationError};
 
     #[tokio::test]
     async fn test_ssrf_localhost_blocked() {
@@ -151,7 +152,7 @@ mod destination_filter_tests {
 
 #[cfg(test)]
 mod ip_tracker_tests {
-    use pinaka_rust_proxy::ip_tracker::{IpTracker, IpTrackerError};
+    use derusted::{IpTracker, IpTrackerError};
     use std::net::IpAddr;
 
     #[tokio::test]
@@ -256,7 +257,7 @@ mod ip_tracker_tests {
 mod body_limiter_tests {
     use bytes::Bytes;
     use http_body_util::Full;
-    use pinaka_rust_proxy::body_limiter::{read_body_with_limit, BodyLimitError};
+    use derusted::body_limiter::{read_body_with_limit, BodyLimitError};
     use hyper::body::Incoming;
 
     // Note: Testing with Incoming body requires more complex setup

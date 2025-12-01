@@ -1,33 +1,33 @@
 [package]
 name = "probe-proxy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+description = "ProbeOps Forward Proxy - Built on Derusted"
 
-[lib]
-name = "pinaka_rust_proxy"
-path = "src/lib.rs"
+[[bin]]
+name = "probe-proxy"
+path = "src/main.rs"
 
 [dependencies]
+# Core proxy library
+derusted = { git = "https://github.com/kumarimlab/derusted", branch = "main" }
+
 # Async runtime
 tokio = { version = "1.35", features = ["full", "signal"] }
 
-# HTTP server (v1.1 for HTTP/1.1 fallback)
+# HTTP types (needed for extensions)
+http = "1.0"
+http-body-util = "0.1"
 hyper = { version = "1.1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-
-# HTTP/2 framing (direct access to streams)
 h2 = "0.4"
 
-# TLS with ALPN support
+# TLS
 tokio-rustls = "0.25"
 rustls = "0.22"
 rustls-pemfile = "2.0"
 
-# HTTP types
-http = "1.0"
-http-body-util = "0.1"
-
-# JWT authentication
+# JWT (for extended claims)
 jsonwebtoken = "9.2"
 base64 = "0.21"
 
@@ -35,10 +35,7 @@ base64 = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Time utilities
-chrono = { version = "0.4", features = ["serde"] }
-
-# Logging and tracing
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
@@ -46,47 +43,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Rate limiting (for extended rate limiter)
+lru = "0.12"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
 # Async utilities
 futures = "0.3"
 bytes = "1.5"
-pin-project = "1.1"
 
-# Metrics
-prometheus = "0.13"
-lazy_static = "1.4"
-
-# Rate limiting
-lru = "0.12"
+# HTTP client for logging
+reqwest = { version = "0.11", features = ["json"] }
 
 # Configuration
 dotenv = "0.15"
-
-# HTTP client (for upstream connections - backend API only)
-reqwest = { version = "0.11", features = ["json"] }
-
-# HTTP forwarding dependencies
-httparse = "1.8"
-webpki-roots = "0.26"
-rand = "0.8"
-
-# DNS and SSRF protection
-trust-dns-resolver = "0.23"
-ipnetwork = "0.20"
-
-# URL parsing for mixed content policy
-url = "2.5"
-
-[dev-dependencies]
-# For h2 client test harness
-rustls-native-certs = "0.7"
-
-[[bin]]
-name = "h2_connect_load"
-path = "tests/h2_connect_load.rs"
-
-[[bin]]
-name = "h1_connect_load"
-path = "tests/h1_connect_load.rs"
 
 [profile.release]
 opt-level = 3

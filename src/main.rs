@@ -4,22 +4,17 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, warn, error};
 
+// ProbeOps-specific modules
 mod config;
-mod tls;
 mod server;
-mod reload;
-mod auth;                // Phase 2: JWT authentication
-mod rate_limiter;        // Phase 2: Rate limiting
-mod logger;              // Request logging to backend
-mod destination_filter;  // SSRF protection
-mod ip_tracker;          // IP-per-token limits
-mod http_client;         // Minimal HTTP client (TcpStream + httparse)
-mod body_limiter;        // Streaming body size enforcement
-mod http_metrics;        // Prometheus metrics for HTTP forwarding
-mod mixed_content;       // Mixed content policy enforcement
+mod auth;
+mod rate_limiter;
+mod logger;
+
+// Use derusted's reload module for TLS hot-reload
+use derusted::reload::ReloadableTlsAcceptor;
 
 use config::Config;
-use reload::ReloadableTlsAcceptor;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,7 +27,7 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    info!("Starting Rust Forward Proxy Server...");
+    info!("Starting ProbeOps Forward Proxy (powered by Derusted)...");
 
     // Load configuration
     let config = Arc::new(Config::from_env()?);
@@ -46,19 +41,19 @@ async fn main() -> Result<()> {
     Arc::clone(&config.request_logger).start_background_flush();
     info!(
         "Request logger started (batch_size={}, interval={}s)",
-        config.log_batch_size, config.log_batch_interval_secs
+        config.log_batch_size(), config.log_batch_interval_secs()
     );
 
-    // Setup reloadable TLS acceptor with HTTP/2 ALPN
+    // Setup reloadable TLS acceptor with HTTP/2 ALPN (using derusted)
     let tls_acceptor = ReloadableTlsAcceptor::new(
-        config.cert_path.clone(),
-        config.key_path.clone(),
+        config.cert_path().to_string(),
+        config.key_path().to_string(),
     )?;
     info!("TLS configured with ALPN protocols: h2, http/1.1");
     info!("Certificate hot-reload enabled via SIGHUP");
 
     // Bind TCP listener
-    let bind_addr = format!("{}:{}", config.host, config.port);
+    let bind_addr = format!("{}:{}", config.host(), config.port());
     let listener = TcpListener::bind(&bind_addr).await?;
     info!("Listening on {}", bind_addr);
 
@@ -159,16 +154,13 @@ async fn reload_signal_handler(tls_acceptor: ReloadableTlsAcceptor) {
 
     #[cfg(not(unix))]
     {
-        // Windows doesn't support SIGHUP
         info!("Certificate hot-reload via SIGHUP not supported on Windows");
-        info!("Certificates can only be reloaded by restarting the server");
         std::future::pending::<()>().await;
     }
 }
 
 /// Graceful shutdown signal handler
 async fn shutdown_signal() {
-    // Handle SIGINT (Ctrl+C)
     let ctrl_c = async {
         signal::ctrl_c()
             .await

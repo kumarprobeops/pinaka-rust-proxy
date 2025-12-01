@@ -101,12 +101,12 @@ mod e2e_tests {
    openssl s_client -connect localhost:8443 -quiet 2>&1 | head -20
 
 3. Test HTTP POST:
-   BODY='{\"test\":\"data\"}'
+   BODY='{{\"test\":\"data\"}}'
    printf \"POST http://httpbin.org/post HTTP/1.1\\r\\n\" \\
           \"Host: httpbin.org\\r\\n\" \\
           \"Proxy-Authorization: Bearer $TOKEN\\r\\n\" \\
           \"Content-Type: application/json\\r\\n\" \\
-          \"Content-Length: ${#BODY}\\r\\n\" \\
+          \"Content-Length: ${{#BODY}}\\r\\n\" \\
           \"Connection: close\\r\\n\\r\\n\" \\
           \"$BODY\" | \\
    openssl s_client -connect localhost:8443 -quiet 2>&1 | head -40

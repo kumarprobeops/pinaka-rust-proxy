@@ -119,7 +119,9 @@ fn create_tls_config() -> Arc<ClientConfig> {
 }
 
 /// Test 1: Missing authentication should return 407
+/// Requires running proxy on localhost:8443
 #[tokio::test]
+#[ignore]
 async fn test_h2_missing_auth_returns_407() -> Result<()> {
     println!("\n=== Test 1: Missing Auth → 407 ===");
 
@@ -181,7 +183,9 @@ async fn test_h2_missing_auth_returns_407() -> Result<()> {
 }
 
 /// Test 2: Invalid JWT should return 403
+/// Requires running proxy on localhost:8443
 #[tokio::test]
+#[ignore]
 async fn test_h2_invalid_jwt_returns_403() -> Result<()> {
     println!("\n=== Test 2: Invalid JWT → 403 ===");
 
@@ -234,7 +238,9 @@ async fn test_h2_invalid_jwt_returns_403() -> Result<()> {
 }
 
 /// Test 3: Valid JWT should return 200 or 502 (depending on upstream)
+/// Requires running proxy on localhost:8443
 #[tokio::test]
+#[ignore]
 async fn test_h2_valid_jwt_returns_200() -> Result<()> {
     println!("\n=== Test 3: Valid JWT → 200 or 502 ===");
 

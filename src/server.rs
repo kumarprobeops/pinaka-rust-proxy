@@ -81,7 +81,7 @@ pub async fn serve_h2(
 
                     let result = if method == Method::CONNECT {
                         handle_h2_connect(request, respond, config).await
-                    } else if config.http_proxy_enabled {
+                    } else if config.http_proxy_enabled() {
                         // Forward HTTP requests (GET, POST, etc.) if HTTP proxy is enabled
                         handle_h2_http_request(request, respond, config).await
                     } else {
@@ -866,7 +866,7 @@ async fn handle_request(
         handle_connect(req, config).await
     } else {
         // Forward HTTP requests (GET, POST, etc.) if enabled
-        if config.http_proxy_enabled {
+        if config.http_proxy_enabled() {
             forward_http_request(req, config).await
         } else {
             // HTTP forwarding disabled - return 204
@@ -951,7 +951,7 @@ async fn forward_http_request(
         .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
     // 5. IP-per-token check
-    if let Err(e) = config.ip_tracker.check_and_track(&claims.token_id, client_ip).await {
+    if let Err(e) = config.base.ip_tracker.check_and_track(&claims.token_id, client_ip).await {
         warn!("[HTTP] IP limit exceeded: {}", e);
         return Ok(Response::builder()
             .status(StatusCode::FORBIDDEN)
@@ -977,10 +977,10 @@ async fn forward_http_request(
     // Check and handle mixed content (HTTP request with HTTPS Referer/Origin)
     // This may upgrade HTTP→HTTPS or block the request based on policy
     let (mut parts, body) = req.into_parts();
-    match crate::mixed_content::handle_mixed_content_request(
+    match derusted::mixed_content::handle_mixed_content_request(
         &mut parts.uri,
         &request_headers,
-        &config,
+        &config.base,
     )
     .await
     {
@@ -999,9 +999,9 @@ async fn forward_http_request(
 
     // 8. Stream body with size limit enforcement (Phase 4: no full buffering)
     // Note: parts and body already extracted above for mixed content check
-    let body_bytes = match crate::body_limiter::read_body_with_limit(
+    let body_bytes = match derusted::body_limiter::read_body_with_limit(
         body,
-        config.max_request_body_size,
+        config.max_request_body_size(),
     )
     .await
     {
@@ -1025,7 +1025,7 @@ async fn forward_http_request(
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     // 9. SSRF protection - resolve and check destination
-    let vetted_ips = match config.destination_filter.check_and_resolve(host).await {
+    let vetted_ips = match config.base.destination_filter.check_and_resolve(host).await {
         Ok(ips) => ips,
         Err(e) => {
             warn!("[HTTP] Destination blocked: {}", e);
@@ -1040,7 +1040,7 @@ async fn forward_http_request(
     // 10. Forward request using http_client
     let body_option = if body_bytes.is_empty() { None } else { Some(body_bytes.clone()) };
 
-    match crate::http_client::forward_request(
+    match derusted::http_client::forward_request(
         vetted_ips,
         port,
         scheme,
@@ -1049,7 +1049,7 @@ async fn forward_http_request(
         host,
         &request_headers,
         body_option,
-        &config,
+        &config.base,
     ).await {
         Ok((status, headers, body)) => {
             // Success - build response
@@ -1082,7 +1082,7 @@ async fn forward_http_request(
             error!("[HTTP] Forward failed: {}", e);
 
             let error_msg = match e {
-                crate::http_client::HttpClientError::ResponseTooLarge { size, limit } => {
+                derusted::http_client::HttpClientError::ResponseTooLarge { size, limit } => {
                     format!("Upstream response too large: {} bytes (limit: {})", size, limit)
                 }
                 _ => format!("Failed to connect to upstream: {}", e),
@@ -1380,52 +1380,17 @@ mod tests {
 
     // Helper to create a test config
     fn create_test_config() -> Arc<Config> {
-        use crate::logger::RequestLogger;
+        // Set required environment variables for test
+        std::env::set_var("JWT_SECRET", "test_secret_key_32_chars_minimum!!");
+        std::env::set_var("PROXY_HOST", "127.0.0.1");
+        std::env::set_var("PROXY_PORT", "8443");
+        std::env::set_var("PROBE_NODE_REGION", "us-east");
+        std::env::set_var("PROBE_NODE_NAME", "test-node");
+        std::env::set_var("BACKEND_URL", "http://localhost:8000");
+        std::env::set_var("TLS_CERT_PATH", "/tmp/test-certs/cert.pem");
+        std::env::set_var("TLS_KEY_PATH", "/tmp/test-certs/key.pem");
 
-        let jwt_validator = Arc::new(JwtValidator::new(
-            "test_secret_key_32_chars_minimum!!".to_string(),
-            "HS256".to_string(),
-            "us-east".to_string(),
-            None, // No issuer validation in tests
-            None, // No audience validation in tests
-        ).unwrap());
-
-        let rate_limiter_config = RateLimiterConfig {
-            requests_per_minute: 60,
-            burst_size: 10,
-            bucket_ttl_seconds: 60,
-            max_buckets: 100,
-        };
-        let rate_limiter = Arc::new(RateLimiter::new(rate_limiter_config));
-
-        let request_logger = Arc::new(RequestLogger::new(
-            "http://localhost:8000".to_string(),
-            "test-node".to_string(),
-            "us-east".to_string(),
-            100,
-            5,
-        ));
-
-        Arc::new(Config {
-            host: "127.0.0.1".to_string(),
-            port: 443,
-            cert_path: "".to_string(),
-            key_path: "".to_string(),
-            jwt_secret: "test_secret_key_32_chars_minimum!!".to_string(),
-            jwt_algorithm: "HS256".to_string(),
-            rate_limit_requests_per_minute: 60,
-            rate_limit_burst_size: 10,
-            rate_limit_bucket_ttl_seconds: 60,
-            rate_limit_max_buckets: 100,
-            backend_url: "http://localhost:8000".to_string(),
-            probe_node_name: "test-node".to_string(),
-            probe_node_region: "us-east".to_string(),
-            log_batch_size: 100,
-            log_batch_interval_secs: 5,
-            jwt_validator,
-            rate_limiter,
-            request_logger,
-        })
+        Arc::new(Config::from_env().expect("Test config should be valid"))
     }
 
     // Helper to create a valid JWT token
@@ -1436,6 +1401,8 @@ mod tests {
             allowed_regions,
             exp: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
             iat: Utc::now().timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: None,
             aud: None,
         };
@@ -1582,9 +1549,11 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
         assert!(response.headers().contains_key("proxy-authenticate"));
+        // Note: We use Basic scheme for Chromium/browser compatibility
+        // (Chromium doesn't support Bearer for proxy auth)
         assert_eq!(
             response.headers().get("proxy-authenticate").unwrap(),
-            "Bearer realm=\"ProbeOps Forward Proxy\""
+            "Basic realm=\"ProbeOps Forward Proxy\""
         );
 
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -1625,6 +1594,8 @@ mod tests {
             allowed_regions: vec!["us-east".to_string()],
             exp: (Utc::now() - chrono::Duration::hours(1)).timestamp(),
             iat: (Utc::now() - chrono::Duration::hours(2)).timestamp(),
+            rate_limit_per_hour: None,
+            concurrent_tabs: None,
             iss: None,
             aud: None,
         };

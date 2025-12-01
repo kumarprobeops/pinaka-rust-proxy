@@ -4,10 +4,11 @@ FROM rust:1.91-slim as builder
 
 WORKDIR /build
 
-# Install build dependencies
+# Install build dependencies (git required for derusted dependency)
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Use separate target directory to avoid conflicts with host builds
