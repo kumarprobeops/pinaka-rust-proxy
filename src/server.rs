@@ -280,7 +280,9 @@ async fn handle_h2_http_request(
                 Some(format!("Connection failed: {}", e)),
             ).await;
 
-            send_h2_error(&mut respond, StatusCode::BAD_GATEWAY, "Failed to connect to upstream").await?;
+            // Return descriptive error to client
+            let error_msg = format!("Connection failed: {}", e);
+            send_h2_error(&mut respond, StatusCode::BAD_GATEWAY, &error_msg).await?;
             return Ok(());
         }
     };
@@ -432,10 +434,12 @@ async fn handle_h2_connect(
                 "[H2 CONNECT] Failed to connect to {} - user_id={}, token_id={}, error={}, duration={:?}",
                 target_host, claims.user_id, claims.token_id, e, duration
             );
+            // Return descriptive error to client (DNS failure, connection refused, etc.)
+            let error_msg = format!("Connection failed: {}", e);
             send_h2_error(
                 &mut respond,
                 StatusCode::BAD_GATEWAY,
-                "Failed to connect to upstream server"
+                &error_msg
             ).await?;
             return Ok(());
         }
